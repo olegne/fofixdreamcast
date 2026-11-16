@@ -18,7 +18,6 @@
 namespace dc {
 namespace {
 
-constexpr unsigned backing_volume = 255; // Frets on Fire defaults songvol to 1.0.
 constexpr unsigned cd_read_buffer_size = 16 * 1024;
 constexpr unsigned clip_sample_rate = 44100;
 
@@ -53,7 +52,7 @@ struct AicaCommand {
 
 } // namespace
 
-bool AudioClip::load(const char *path, unsigned volume) {
+bool AudioClip::load(const char *path) {
     auto *file = std::fopen(path, "rb");
     if (!file) {
         return false;
@@ -79,7 +78,6 @@ bool AudioClip::load(const char *path, unsigned volume) {
     int16_t interleaved[Audio::block_frames * 2];
     auto *left = pcm.get();
     auto *right = left + stride;
-    const int gain = std::min(volume, 128u);
     for (unsigned offset = 0; offset < frames; offset += Audio::block_frames) {
         const auto count = std::min(Audio::block_frames, unsigned(frames) - offset);
         if (!read_pcm(*decoder, interleaved, count * 2 * sizeof(int16_t))) {
@@ -87,8 +85,8 @@ bool AudioClip::load(const char *path, unsigned volume) {
             return false;
         }
         for (unsigned i = 0; i < count; ++i) {
-            left[offset + i] = interleaved[2 * i] * gain / 128;
-            right[offset + i] = interleaved[2 * i + 1] * gain / 128;
+            left[offset + i] = interleaved[2 * i];
+            right[offset + i] = interleaved[2 * i + 1];
         }
     }
     std::fill(left + frames, left + stride, 0);
@@ -100,11 +98,11 @@ bool AudioClip::load(const char *path, unsigned volume) {
     return true;
 }
 
-bool Audio::start(const char *backing, const char *guitar) {
-    return prepare(backing, guitar) && play_prepared();
+bool Audio::start(const char *backing, const char *guitar, const char *rhythm) {
+    return prepare(backing, guitar, rhythm) && play_prepared();
 }
 
-bool Audio::start_clip(const AudioClip &clip) {
+bool Audio::start_clip(const AudioClip &clip, unsigned volume) {
     stop();
     if (!clip.pcm_) {
         error_ = "Audio effect not loaded.";
@@ -116,7 +114,7 @@ bool Audio::start_clip(const AudioClip &clip) {
     }
     error_ = nullptr;
     rate_ = clip_sample_rate;
-    guitar_volume_ = 255;
+    clip_gain_ = std::min(volume, 100u) * 128 / 100;
     auto &stem = stems_[0];
     stem.clip = &clip;
     stem.channels = 2;
@@ -132,11 +130,13 @@ bool Audio::start_clip(const AudioClip &clip) {
     return true;
 }
 
-bool Audio::prepare(const char *backing, const char *guitar, PrepareService service) {
+bool Audio::prepare(const char *backing, const char *guitar, const char *rhythm, PrepareService service,
+                    unsigned start_ms) {
     stop();
     error_ = nullptr;
     rate_ = played_frames_ = 0;
-    guitar_volume_ = 255;
+    guitar_gate_ = 1.0f;
+    guitar_controls_backing_ = false;
     if (snd_init() < 0) {
         fail("AICA initialization failed.");
         return false;
@@ -145,8 +145,23 @@ bool Audio::prepare(const char *backing, const char *guitar, PrepareService serv
         stop();
         return false;
     }
+    if (rhythm && !open(stems_[2], rhythm, service)) {
+        // Song.py treats a rhythm stem that cannot be loaded as optional.
+        std::printf("FoFDC: rhythm skipped: %s\n", error_);
+        close_stem(stems_[2]);
+        error_ = nullptr;
+    }
     length_frames_ = stems_[0].frames;
+    played_frames_ = unsigned(std::min(uint64_t(length_frames_ - 1), uint64_t(start_ms) * rate_ / 1000));
     for (auto &stem : stems_) {
+        if (stem.open && played_frames_) {
+            const auto frame = std::min(played_frames_, stem.frames);
+            if (frame < stem.frames && ov_pcm_seek(&stem.decoder, frame) != 0) {
+                fail("Could not seek in the audio track.");
+                return false;
+            }
+            stem.decoded = frame;
+        }
         for (unsigned block = 0; stem.open && block < blocks; ++block) {
             if (service) {
                 service();
@@ -168,9 +183,13 @@ bool Audio::play_prepared() {
         return false;
     }
     prepared_ = false;
-    begin_stream(0);
-    std::printf("FoFDC: audio %u Hz, backing=%u ch guitar=%u ch samples=%u\n",
+    begin_stream(played_frames_);
+    std::printf("FoFDC: audio %u Hz, backing=%u ch guitar=%u ch samples=%u",
                 rate_, stems_[0].channels, stems_[1].channels, length_frames_);
+    if (stems_[2].open) {
+        std::printf(" rhythm=%u ch", stems_[2].channels);
+    }
+    std::puts("");
     return true;
 }
 
@@ -231,7 +250,7 @@ bool Audio::open(Stem &stem, const char *path, PrepareService service) {
     }
     const auto rate = static_cast<unsigned>(info->rate);
     if (rate_ && rate_ != rate) {
-        error_ = "The backing and guitar tracks must share a sample rate.";
+        error_ = "The audio tracks must share a sample rate.";
         return false;
     }
     rate_ = rate;
@@ -272,8 +291,15 @@ bool Audio::fill(Stem &stem, unsigned block) {
         for (unsigned channel = 0; channel < stem.channels; ++channel) {
             auto *samples = clip->pcm_.get() + channel * clip->stride_ + stem.decoded;
             // Resuming an effect can start the ring at a sample not aligned for store queues.
-            if (frames != block_frames || ((stem.decoded * sizeof(int16_t)) & 31)) {
-                std::copy_n(samples, frames, split_[channel]);
+            if (clip_gain_ != 128 || frames != block_frames || ((stem.decoded * sizeof(int16_t)) & 31)) {
+                if (clip_gain_ == 128) {
+                    std::copy_n(samples, frames, split_[channel]);
+                } else {
+                    const auto gain = int(clip_gain_);
+                    for (unsigned i = 0; i < frames; ++i) {
+                        split_[channel][i] = samples[i] * gain / 128;
+                    }
+                }
                 std::fill(split_[channel] + frames, split_[channel] + block_frames, 0);
                 samples = split_[channel];
             }
@@ -320,11 +346,13 @@ void Audio::queue_start() {
     uint64_t mask = 0;
 
     snd_sh4_to_aica_stop();
-    for (const auto &stem : stems_) {
+    for (unsigned index = 0; index < 3; ++index) {
+        auto &stem = stems_[index];
+        stem.volume = stem_volume(index);
         for (unsigned i = 0; i < stem.channels; ++i) {
             voice->base = stem.address[i];
             voice->pan = stem.channels == 1 ? 128 : (i == 0 ? 0 : 255);
-            voice->vol = &stem == &stems_[1] || !has_guitar() ? guitar_volume_ : backing_volume;
+            voice->vol = stem.volume;
             cmd.send(stem.channel[i], AICA_CH_CMD_START | AICA_CH_START_DELAY);
             mask |= uint64_t{1} << stem.channel[i];
         }
@@ -373,6 +401,15 @@ void Audio::poll() {
                 fail("Error decoding the audio track.");
                 return;
             }
+        }
+    }
+    if (fade_duration_ms_) {
+        const auto elapsed_ms = now / 1000 - fade_begin_ms_;
+        if (elapsed_ms >= fade_duration_ms_) {
+            stop();
+        } else {
+            fade_volume_ = fade_begin_volume_ * (fade_duration_ms_ - elapsed_ms) / fade_duration_ms_;
+            update_volume();
         }
     }
 }
@@ -462,20 +499,65 @@ bool Audio::resume() {
     return true;
 }
 
-void Audio::guitar_gain(float volume) {
-    const unsigned value = std::clamp(static_cast<int>(volume * 255.0f + 0.5f), 0, 255);
-    if (value == guitar_volume_) {
+unsigned Audio::stem_volume(unsigned index) const {
+    if (stems_[index].clip) {
+        return fade_volume_; // SDL clip gain is already applied to its PCM.
+    }
+    const float level = index == 1 || (index == 0 && guitar_controls_backing_) ? guitar_level_ * guitar_gate_ :
+                        index == 0 ? song_level_ : rhythm_level_;
+    const float linear = level * fade_volume_ / 100.0f;
+    // KOS truncates its logarithmic AICA attenuation. Bias by half a hardware
+    // step (2^(-1/32)) so intermediate gains round towards the requested level.
+    return linear >= 255.0f ? 255u : static_cast<unsigned>(linear * 0.97857206f + 0.5f);
+}
+
+void Audio::update_volume() {
+    if (!active_) {
         return;
     }
-    guitar_volume_ = value;
-    if (active_) {
-        const auto &voice = stems_[has_guitar() ? 1 : 0];
-        AicaCommand cmd;
-        cmd.voice()->vol = guitar_volume_;
-        for (unsigned i = 0; i < voice.channels; ++i) {
-            cmd.send(voice.channel[i], AICA_CH_CMD_UPDATE | AICA_CH_UPDATE_SET_VOL);
+    AicaCommand cmd;
+    for (unsigned index = 0; index < 3; ++index) {
+        auto &stem = stems_[index];
+        const auto volume = stem_volume(index);
+        if (!stem.channels || volume == stem.volume) {
+            continue;
+        }
+        stem.volume = volume;
+        cmd.voice()->vol = volume;
+        for (unsigned i = 0; i < stem.channels; ++i) {
+            cmd.send(stem.channel[i], AICA_CH_CMD_UPDATE | AICA_CH_UPDATE_SET_VOL);
         }
     }
+}
+
+void Audio::set_mix(unsigned guitar, unsigned song, unsigned rhythm) {
+    guitar_level_ = std::min(guitar, 100u);
+    song_level_ = std::min(song, 100u);
+    rhythm_level_ = std::min(rhythm, 100u);
+    update_volume();
+}
+
+void Audio::guitar_gain(float gate, bool picked) {
+    const float value = std::clamp(gate, 0.0f, 1.0f);
+    const bool use_backing = !has_guitar() && (picked || value != guitar_gate_ || guitar_controls_backing_);
+    if (value != guitar_gate_ || use_backing != guitar_controls_backing_) {
+        guitar_gate_ = value;
+        guitar_controls_backing_ = use_backing;
+        update_volume();
+    }
+}
+
+void Audio::fade_out(unsigned duration_ms) {
+    if (!active_ || fade_duration_ms_) {
+        return;
+    }
+    if (!duration_ms) {
+        stop();
+        return;
+    }
+    fade_begin_ms_ = timer_ms_gettime64();
+    fade_begin_volume_ = fade_volume_;
+    fade_duration_ms_ = duration_ms;
 }
 
 int Audio::position_ms() const {
@@ -486,28 +568,34 @@ void Audio::stop() {
     halt();
     paused_ = false;
     prepared_ = false;
+    fade_volume_ = 255;
+    fade_duration_ms_ = 0;
     for (auto &stem : stems_) {
-        for (unsigned i = 0; i < 2; ++i) {
-            if (stem.channel[i] >= 0) {
-                snd_sfx_chn_free(stem.channel[i]);
-                stem.channel[i] = -1;
-            }
-            if (stem.address[i]) {
-                snd_mem_free(stem.address[i]);
-                stem.address[i] = 0;
-            }
-        }
-        if (stem.open) {
-            ov_clear(&stem.decoder);
-            stem.open = false;
-        }
-        stem.file = nullptr;
-        stem.service = nullptr;
-        stem.clip = nullptr;
-        std::free(stem.read_buffer);
-        stem.read_buffer = nullptr;
-        stem.channels = stem.frames = stem.decoded = 0;
+        close_stem(stem);
     }
+}
+
+void Audio::close_stem(Stem &stem) {
+    for (unsigned i = 0; i < 2; ++i) {
+        if (stem.channel[i] >= 0) {
+            snd_sfx_chn_free(stem.channel[i]);
+            stem.channel[i] = -1;
+        }
+        if (stem.address[i]) {
+            snd_mem_free(stem.address[i]);
+            stem.address[i] = 0;
+        }
+    }
+    if (stem.open) {
+        ov_clear(&stem.decoder);
+        stem.open = false;
+    }
+    stem.file = nullptr;
+    stem.service = nullptr;
+    stem.clip = nullptr;
+    std::free(stem.read_buffer);
+    stem.read_buffer = nullptr;
+    stem.channels = stem.frames = stem.decoded = 0;
 }
 
 void Audio::fail(const char *message) {
@@ -519,6 +607,13 @@ void Audio::fail(const char *message) {
 void ResultAudio::schedule(const char *path) {
     pending_ = path;
     scheduled_ms_ = timer_ms_gettime64();
+}
+
+void ResultAudio::set_volume(unsigned guitar) {
+    volume_ = guitar;
+    if (audio_) {
+        audio_->set_mix(guitar, guitar, 100);
+    }
 }
 
 void ResultAudio::pause() {
@@ -553,6 +648,9 @@ void ResultAudio::poll(bool results_visible) {
     pending_ = nullptr;
     if (!audio_) {
         audio_.reset(new (std::nothrow) Audio);
+        if (audio_) {
+            audio_->set_mix(volume_, volume_, 100);
+        }
     }
     if (!audio_) {
         std::printf("FoFDC: could not allocate result audio for %s\n", path);

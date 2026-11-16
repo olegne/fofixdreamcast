@@ -70,16 +70,18 @@ void read_ini(const std::string &path, SongEntry &song) {
     std::fclose(file);
 }
 
-void load_directory(const std::string &path, std::vector<SongEntry> &songs, unsigned depth) {
+void load_directory(const std::string &path, std::vector<SongEntry> &songs, unsigned depth, bool imports) {
     if (depth > max_directory_depth || songs.size() == max_songs) {
         return;
     }
-    if (is_file(path + "/notes.mid")) {
+    const bool has_chart = is_file(path + "/notes.mid");
+    const auto guitar = path + "/guitar.ogg";
+    if (has_chart || (imports && is_file(guitar))) {
         SongEntry song;
         song.title = path.substr(path.find_last_of('/') + 1);
         song.midi = path + "/notes.mid";
+        song.blank_chart = !has_chart;
         const auto backing = path + "/song.ogg";
-        const auto guitar = path + "/guitar.ogg";
         if (is_file(backing)) {
             song.backing = backing;
             if (is_file(guitar)) {
@@ -89,6 +91,10 @@ void load_directory(const std::string &path, std::vector<SongEntry> &songs, unsi
             song.backing = guitar;
         } else {
             return;
+        }
+        const auto rhythm = path + "/rhythm.ogg";
+        if (is_file(rhythm)) {
+            song.rhythm = rhythm;
         }
         read_ini(path + "/song.ini", song);
         if (path == "/cd/songs/tutorial") {
@@ -109,7 +115,7 @@ void load_directory(const std::string &path, std::vector<SongEntry> &songs, unsi
         const auto child = path + "/" + entry->d_name;
         struct stat info{};
         if (stat(child.c_str(), &info) == 0 && S_ISDIR(info.st_mode)) {
-            load_directory(child, songs, depth + 1);
+            load_directory(child, songs, depth + 1, imports);
         }
         if (songs.size() == max_songs) {
             break;
@@ -123,10 +129,18 @@ void load_directory(const std::string &path, std::vector<SongEntry> &songs, unsi
 std::vector<SongEntry> song_library() {
     std::vector<SongEntry> songs;
     songs.push_back({"Tutorial", "Jurgen", "/rd/tutorial/notes.mid", "/rd/tutorial/song.ogg",
-                     "/rd/tutorial/guitar.ogg", 0, true});
+                     "/rd/tutorial/guitar.ogg", {}, 0, true});
     const auto built_in = songs.size();
-    load_directory("/cd/songs", songs, 0);
+    load_directory("/cd/songs", songs, 0, false);
     std::sort(songs.begin() + built_in, songs.end(),
+              [](const SongEntry &a, const SongEntry &b) { return a.title < b.title; });
+    return songs;
+}
+
+std::vector<SongEntry> imported_song_sources() {
+    std::vector<SongEntry> songs;
+    load_directory("/cd/imports", songs, 0, true);
+    std::sort(songs.begin(), songs.end(),
               [](const SongEntry &a, const SongEntry &b) { return a.title < b.title; });
     return songs;
 }

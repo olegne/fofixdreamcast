@@ -18,6 +18,7 @@ struct Chord {
     // The renderer uses milliseconds. Judgement and sustain scoring retain fractions.
     uint16_t start_us_remainder = 0;
     std::array<uint16_t, 5> end_us_remainders{};
+    uint8_t special_frets = 0;
 };
 
 using Chart = std::vector<Chord>;
@@ -41,14 +42,17 @@ struct SongChart {
     unsigned us_per_beat(int time_ms) const;
 };
 
-bool load_song_chart(const char *path, SongChart &song, std::string &error);
+bool load_song_chart(const char *path, SongChart &song, std::string &error,
+                     bool allow_empty = false);
+bool parse_song_midi(const std::vector<uint8_t> &bytes, SongChart &song, std::string &error,
+                     bool allow_empty = false);
 
 inline unsigned fret_count(uint8_t mask) {
     return static_cast<unsigned>(__builtin_popcount(mask));
 }
 
 struct Rules {
-    explicit Rules(float bpm = 120, int delay_ms = 0);
+    explicit Rules(float bpm = 120, int delay_ms = 0, bool tapping_enabled = true);
 
     float early_ms;
     float late_ms;
@@ -58,6 +62,7 @@ struct Rules {
     int release_us;
     int sustain_threshold_us;
     int delay_ms;
+    bool tapping;
 };
 
 enum class Pick { neutral, hit, bad };
@@ -68,6 +73,7 @@ public:
     Pick pick(const Chart &chart, int time_ms, uint8_t held, const Rules &rules, bool tap);
     Pick fret_edge(const Chart &chart, int time_ms, uint8_t held, const Rules &rules, bool released);
     void finish(const Chart &chart, int time_ms, const Rules &rules);
+    uint8_t required_frets(const Chart &chart, int time_ms, const Rules &rules) const;
     unsigned multiplier() const;
     unsigned display_score(int time_ms, const Rules &rules) const;
     unsigned rating(unsigned gems) const;

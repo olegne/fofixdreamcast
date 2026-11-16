@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """Convert the Frets on Fire 1.3.110 Linux artwork to Dreamcast ROM disk assets."""
 import array
+from collections import defaultdict
+from itertools import permutations
 import math
 from pathlib import Path
 import shutil
@@ -13,6 +15,7 @@ from collada import Collada
 from collada.common import DaeBrokenRefError
 
 from prepare_classic_sounds import sounds
+from prepare_locale import locales, pack_texture, pack_texture
 
 
 TEXTURES = {
@@ -48,12 +51,26 @@ TEXTURES = {
 }
 
 
-def texture(image, path, solid=False):
+def texture(image, path, solid=False, dither_opaque=False):
     width, height = image.size
     if solid:
         pixels = iter(image.convert("RGB").tobytes())
         words = array.array("H", (((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
                                   for r, g, b in zip(pixels, pixels, pixels)))
+    elif dither_opaque:
+        # Keep the transparent edges unchanged. Dither gradients on the
+        # solid face of tutorial keys before storing ARGB4444.
+        bayer = ((0, 8, 2, 10), (12, 4, 14, 6), (3, 11, 1, 9), (15, 7, 13, 5))
+        pixels = iter(image.convert("RGBA").tobytes())
+        words = array.array("H")
+        for index, (r, g, b, a) in enumerate(zip(pixels, pixels, pixels, pixels)):
+            if a == 255:
+                rank = bayer[(index // width) % 4][index % 4]
+                offset = (2 * rank + 1) * 17 // 32
+                r, g, b = ((component + offset) // 17 for component in (r, g, b))
+            else:
+                r, g, b = r >> 4, g >> 4, b >> 4
+            words.append(((a >> 4) << 12) | (r << 8) | (g << 4) | b)
     else:
         pixels = iter(image.convert("RGBA").tobytes())
         words = array.array("H", (((a >> 4) << 12) | ((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4)
@@ -78,6 +95,17 @@ def additive_light_texture(image, path):
     if sys.byteorder != "little":
         words.byteswap()
     path.write_bytes(struct.pack("<4H", *image.size, 0, 0) + words.tobytes())
+
+
+def light_graphics_stage(data, out):
+    # Leave a 32-pixel screen margin for the widest miss wiggle in stage.ini.
+    for number, scale in ((1, 1.3), (2, 1.5)):
+        with Image.open(data / "mods" / "LightGraphics" / f"flame{number}.png") as src:
+            width, height = src.size
+            bounds = (width / 2 - 352 / scale, height / 2 - 272 / scale,
+                      width / 2 + 352 / scale, height / 2 + 272 / scale)
+            image = src.convert("RGBA").resize((256, 256), Image.Resampling.LANCZOS, box=bounds)
+        pack_texture(image, out / f"light-graphics-flame{number}.tex", texture)
 
 
 def font_atlas(source, out, name):
@@ -165,31 +193,59 @@ def store_mesh(faces, path):
                 packed.write(struct.pack(f"<{len(vertex)}f", *vertex))
 
 
-def preview(faces, project, size):
-    image = Image.new("RGBA", size)
-    draw = ImageDraw.Draw(image)
-    projected = [[project(x, y, z) for x, y, z, _ in face] for face in faces]
-    order = sorted(range(len(faces)), key=lambda i: -sum(v[2] for v in projected[i]) / len(projected[i]))
-    for i in order:
-        intensity = min(255, round(255 * sum(v[3] for v in faces[i]) / len(faces[i])))
-        draw.polygon([(x, y) for x, y, _ in projected[i]],
-                     fill=(intensity, intensity, intensity, 255))
-    return image
+def store_note_strips(faces, path):
+    # Match all vertex attributes so joining adjacent faces preserves their original colors.
+    triangles = []
+    for face in faces:
+        vertices = [tuple(map(float, vertex)) for vertex in face]
+        if len(face) == 4:
+            triangles.extend(((vertices[0], vertices[1], vertices[3]),
+                              (vertices[3], vertices[1], vertices[2])))
+        else:
+            triangles.extend((vertices[0], vertices[i], vertices[i + 1])
+                             for i in range(1, len(vertices) - 1))
+    edges = defaultdict(list)
+    for index, triangle in enumerate(triangles):
+        for i in range(3):
+            edges[frozenset((triangle[i - 1], triangle[i]))].append((index, triangle[i - 2]))
 
+    def grow(index, order, available):
+        sequence = list(order)
+        visited = {index}
+        while len(sequence) < 64:
+            edge = frozenset(sequence[-2:])
+            adjacent = next(((n, corner) for n, corner in edges[edge]
+                             if n in available and n not in visited), None)
+            if adjacent is None:
+                break
+            neighbor, vertex = adjacent
+            visited.add(neighbor)
+            sequence.append(vertex)
+        return sequence, visited
 
-def note_preview(x, y, z):
-    # Project the original model at the hit line for small, distant notes.
-    depth = (7 * (z + 3) - 3 * (y - 3)) / math.hypot(7, 3)
-    up = (7 * (y - 3) + 3 * (z + 3)) / math.hypot(7, 3)
-    return 64 - 896 * x / depth, 64 - 896 * (up / depth + 0.4), depth
+    open_faces = set(range(len(triangles)))
+    strips = []
+    for index, triangle in enumerate(triangles):
+        if index in open_faces:
+            vertices, used = max((grow(index, order, open_faces) for order in permutations(triangle)),
+                                 key=lambda strip: len(strip[0]))
+            open_faces.difference_update(used)
+            strips.append(vertices)
+    with path.open("wb") as output:
+        output.write(struct.pack("<I", len(strips)))
+        for strip in strips:
+            output.write(struct.pack("<I", len(strip)))
+            for vertex in strip:
+                output.write(struct.pack("<4f", *vertex))
 
 
 def cassette_faces(document, node_name, sticker=False):
     nodes = document.scenes[0].nodes
-    lamp = next(node for node in nodes if node.id.startswith("Lamp"))
-    direction = lamp.matrix[:3, 3]
-    direction = direction / math.hypot(*direction)
-    light = next(child.light.color[0] for child in lamp.children if hasattr(child, "light"))
+    lamp = next((node for node in nodes if node.id.startswith("Lamp")), None)
+    if lamp is not None:
+        direction = lamp.matrix[:3, 3]
+        direction = direction / math.hypot(*direction)
+        light = next(child.light.color[0] for child in lamp.children if hasattr(child, "light"))
     node = next(node for node in nodes if node.id == node_name)
     scale = math.hypot(*node.matrix[:3, 0])
     faces = []
@@ -200,8 +256,11 @@ def cassette_faces(document, node_name, sticker=False):
                 for i, (point, normal) in enumerate(zip(polygon.vertices, polygon.normals)):
                     # Mesh.py uses directional diffuse plus OpenGL's global ambient.
                     # Normalize the bound direction, then apply the inverse model scale.
-                    dot = sum(a * b for a, b in zip(normal, direction)) / math.hypot(*normal)
-                    shade = 0.2 + light * max(0.0, dot) / scale
+                    shade = 1.0
+                    if lamp is not None:
+                        length = math.hypot(*normal)
+                        dot = sum(a * b for a, b in zip(normal, direction)) / length if length else 0.0
+                        shade = 0.2 + light * max(0.0, dot) / scale
                     vertex = (*point, shade)
                     if sticker:
                         u, v = polygon.texcoords[0][i]
@@ -214,14 +273,37 @@ def cassette_faces(document, node_name, sticker=False):
 def cassette_assets(data, out):
     cassette = Collada(str(data / "cassette.dae"))
     label = Collada(str(data / "label.dae"))
+    library = Collada(str(data / "library.dae"))
+    library_label = Collada(str(data / "library_label.dae"))
     store_mesh(cassette_faces(cassette, "Mesh_001"), out / "cassette-shell.mesh")
     store_mesh(cassette_faces(cassette, "Mesh"), out / "cassette-reels.mesh")
+    store_mesh(cassette_faces(library, "Mesh_001"), out / "library-shell.mesh")
+    store_mesh(cassette_faces(library, "Mesh"), out / "library-details.mesh")
     store_mesh(cassette_faces(label, "Mesh_001", sticker=True), out / "cassette-sticker.mesh")
+    store_mesh(cassette_faces(library_label, "label_None", sticker=True), out / "library-sticker.mesh")
     for song in ("bangbang", "defy", "twibmpg"):
         label = data / "songs" / song / "label.png"
         with Image.open(label) as image:
             texture(image.convert("RGBA").resize((256, 128), Image.Resampling.LANCZOS),
                     out / ("label-" + song + ".tex"))
+
+
+def mod_assets(data, visual, stage_background):
+    for folder, prefix in (("Chilly", "chilly"), ("LightGraphics", "light")):
+        source = data / "mods" / folder
+        for name, (filename, size) in TEXTURES.items():
+            candidate = source / filename
+            if "/" in filename or not candidate.is_file():
+                continue
+            with Image.open(candidate) as image:
+                atlas = image.convert("RGBA").resize(size, Image.Resampling.LANCZOS)
+            converter = additive_light_texture if name == "glow" else texture
+            pack_texture(atlas, visual / f"{prefix}-{name}.tex", converter)
+
+    chilly = Image.new("RGBA", stage_background.size, (0, 0, 51, 255))
+    chilly.alpha_composite(stage_background)
+    pack_texture(chilly.resize((512, 512), Image.Resampling.LANCZOS),
+                 visual / "chilly-stage.tex", lambda image, path: texture(image, path, solid=True))
 
 
 def main(data, out):
@@ -235,7 +317,7 @@ def main(data, out):
         if name in ("stage-beam", "glow"):
             additive_light_texture(scaled, destination)
         else:
-            texture(scaled, destination)
+            texture(scaled, destination, dither_opaque=name in ("tutorial-keyboard", "tutorial-escape"))
 
     # The center 640x480 of stage.ini's 1.3x backdrop fills the viewport.
     with Image.open(data / "stage_background.png") as src:
@@ -246,20 +328,21 @@ def main(data, out):
     flat = Image.new("RGBA", background.size, (51, 0, 0, 255))
     flat.alpha_composite(background)
     texture(flat.resize((512, 512), Image.Resampling.LANCZOS), visual / "stage.tex", solid=True)
+    mod_assets(data, visual, background)
+    light_graphics_stage(data, visual)
 
     font_atlas(data / "default.ttf", visual, "font")
     title_numbers(data / "title.ttf", visual)
+    locales(data, out, texture)
     notes = polygons(data / "note.dae", {"Mesh_001": 1.0, "Mesh": 0.75, "Mesh_002": 0.25},
                      scene_light=True)
     hopo = polygons(data / "note.dae", {"Mesh_003": 1.0}, scene_light=True)
     # Compose Guitar.renderFrets' Y(+90), X(-90), Z(-90) rotations in that order.
     keys = polygons(data / "key.dae", {"Mesh": 1.0}, orient=lambda p: (p[0], p[2], -p[1]),
                     scene_light=True)
-    store_mesh(notes, visual / "notes.mesh")
-    store_mesh(hopo, visual / "hopo.mesh")
+    store_note_strips(notes, visual / "notes.mesh")
+    store_note_strips(hopo, visual / "hopo.mesh")
     store_mesh(keys, visual / "keys.mesh")
-    texture(preview(notes, note_preview, (128, 128)), visual / "gem.tex")
-    texture(preview(notes + hopo, note_preview, (128, 128)), visual / "tap-gem.tex")
     cassette_assets(data, visual)
     sounds(data, out)
     for name in ("notes.mid", "song.ogg", "guitar.ogg", "song.ini", "script.txt"):

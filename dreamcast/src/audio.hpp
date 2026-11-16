@@ -12,7 +12,7 @@ namespace dc {
 
 class AudioClip {
 public:
-    bool load(const char *path, unsigned volume);
+    bool load(const char *path);
     bool loaded() const { return bool(pcm_); }
 
 private:
@@ -27,15 +27,18 @@ public:
     using PrepareService = void (*)();
 
     ~Audio() { stop(); }
-    bool start(const char *backing, const char *guitar = nullptr);
-    bool start_clip(const AudioClip &clip);
-    bool prepare(const char *backing, const char *guitar = nullptr, PrepareService service = nullptr);
+    bool start(const char *backing, const char *guitar = nullptr, const char *rhythm = nullptr);
+    bool start_clip(const AudioClip &clip, unsigned volume = 100);
+    bool prepare(const char *backing, const char *guitar = nullptr, const char *rhythm = nullptr,
+                 PrepareService service = nullptr, unsigned start_ms = 0);
     bool play_prepared();
     void poll();
     bool pause();
     bool resume();
     void stop();
-    void guitar_gain(float volume);
+    void set_mix(unsigned guitar, unsigned song, unsigned rhythm);
+    void guitar_gain(float gate, bool picked = false);
+    void fade_out(unsigned duration_ms);
 
     int position_ms() const;
     uint64_t position_sampled_at_us() const { return last_poll_us_; }
@@ -61,19 +64,23 @@ private:
         unsigned channels = 0;
         unsigned frames = 0;
         unsigned decoded = 0;
+        unsigned volume = 255;
         bool open = false;
     };
 
     bool open(Stem &stem, const char *path, PrepareService service);
     bool allocate_channels(Stem &stem);
+    static void close_stem(Stem &stem);
     bool decode(Stem &stem, unsigned count);
     bool fill(Stem &stem, unsigned block);
     void begin_stream(unsigned position);
     void queue_start();
+    unsigned stem_volume(unsigned index) const;
+    void update_volume();
     bool halt();
     void fail(const char *message);
 
-    Stem stems_[2];
+    Stem stems_[3];
     alignas(32) int16_t decoded_[block_frames * 2];
     alignas(32) int16_t split_[2][block_frames];
     alignas(32) int16_t resume_pcm_[ring_frames];
@@ -86,7 +93,16 @@ private:
     unsigned played_frames_ = 0;
     unsigned ring_origin_ = 0;
     unsigned last_cursor_ = 0;
-    unsigned guitar_volume_ = 255;
+    unsigned guitar_level_ = 100;
+    unsigned song_level_ = 100;
+    unsigned rhythm_level_ = 100;
+    unsigned clip_gain_ = 128;
+    float guitar_gate_ = 1.0f;
+    bool guitar_controls_backing_ = false;
+    unsigned fade_volume_ = 255;
+    unsigned fade_begin_volume_ = 255;
+    unsigned fade_duration_ms_ = 0;
+    uint64_t fade_begin_ms_ = 0;
     uint64_t last_poll_us_ = 0;
     const char *error_ = nullptr;
 };
@@ -95,6 +111,7 @@ class ResultAudio {
 public:
     void schedule(const char *path);
     void poll(bool results_visible);
+    void set_volume(unsigned guitar);
     void pause();
     void resume();
     bool playing() const { return audio_ && audio_->playing(); }
@@ -103,6 +120,7 @@ private:
     std::unique_ptr<Audio> audio_;
     const char *pending_ = nullptr;
     uint64_t scheduled_ms_ = 0;
+    unsigned volume_ = 100;
 };
 
 } // namespace dc

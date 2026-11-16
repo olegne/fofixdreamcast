@@ -66,6 +66,7 @@ struct Gem {
     uint32_t end;
     uint8_t pitch;
     unsigned tempo_at_off;
+    bool special;
     bool tappable = false;
 };
 
@@ -79,6 +80,7 @@ bool read_track(Reader track, std::vector<Tempo> &tempos,
     uint8_t running_status = 0;
     std::array<uint32_t, 16 * 128> held;
     held.fill(unheld);
+    std::array<bool, 16 * 128> special{};
     while (track.remaining()) {
         uint32_t delta;
         if (!track.varint(delta) || delta >= unheld - tick || !track.remaining()) {
@@ -145,14 +147,16 @@ bool read_track(Reader track, std::vector<Tempo> &tempos,
         if (!has_notes || (command != 0x80 && command != 0x90) || !is_gem(pitch)) {
             continue;
         }
-        auto &start = held[(status & 0x0f) * 128 + pitch];
+        const auto slot = (status & 0x0f) * 128 + pitch;
+        auto &start = held[slot];
         if (command == 0x90 && data[1]) {
             start = tick;
+            special[slot] = data[1] == 127;
         } else if (start != unheld) {
             if (gems.size() == max_events) {
                 return false;
             }
-            gems.push_back({start, tick, pitch, tempos.empty() ? 500000u : tempos.back().us_per_beat});
+            gems.push_back({start, tick, pitch, tempos.empty() ? 500000u : tempos.back().us_per_beat, special[slot]});
             start = unheld;
         }
     }
@@ -175,7 +179,11 @@ bool before_last_bucket(const Chord &chord, int64_t window_end_us) {
     return chord.time_ms / 50 < window_end_us / 50000;
 }
 
-bool parse_chart(const std::vector<uint8_t> &bytes, SongChart &song, std::string &error) {
+bool parse_chart(const std::vector<uint8_t> &bytes, SongChart &song, std::string &error, bool allow_empty) {
+    if (bytes.size() < 14 || bytes.size() > max_chart_bytes) {
+        error = "Invalid MIDI file length.";
+        return false;
+    }
     Reader file{bytes.data(), bytes.data() + bytes.size()};
     auto *chunk = file.take(8);
     if (!chunk || std::memcmp(chunk, "MThd", 4) != 0) {
@@ -213,7 +221,7 @@ bool parse_chart(const std::vector<uint8_t> &bytes, SongChart &song, std::string
             return false;
         }
     }
-    if (guitar.empty()) {
+    if (guitar.empty() && !allow_empty) {
         error = "No five-fret guitar chart in this MIDI.";
         return false;
     }
@@ -301,6 +309,9 @@ bool parse_chart(const std::vector<uint8_t> &bytes, SongChart &song, std::string
         }
         auto &target = track.back();
         target.frets |= 1u << fret;
+        if (gem.special) {
+            target.special_frets |= 1u << fret;
+        }
         target.hopo &= gem.tappable;
         if (end_us > uint64_t(target.ends[fret]) * 1000 + target.end_us_remainders[fret]) {
             target.ends[fret] = static_cast<int>(end_us / 1000);
@@ -325,7 +336,7 @@ bool parse_chart(const std::vector<uint8_t> &bytes, SongChart &song, std::string
 
 } // namespace
 
-bool load_song_chart(const char *path, SongChart &song, std::string &error) {
+bool load_song_chart(const char *path, SongChart &song, std::string &error, bool allow_empty) {
     auto *file = std::fopen(path, "rb");
     if (!file) {
         error = "Could not open notes.mid.";
@@ -345,7 +356,11 @@ bool load_song_chart(const char *path, SongChart &song, std::string &error) {
         error = "Could not read notes.mid.";
         return false;
     }
-    return parse_chart(bytes, song, error);
+    return parse_song_midi(bytes, song, error, allow_empty);
+}
+
+bool parse_song_midi(const std::vector<uint8_t> &bytes, SongChart &song, std::string &error, bool allow_empty) {
+    return parse_chart(bytes, song, error, allow_empty);
 }
 
 unsigned SongChart::us_per_beat(int time_ms) const {
@@ -356,7 +371,7 @@ unsigned SongChart::us_per_beat(int time_ms) const {
     return it == tempos.begin() ? 500000u : (it - 1)->us_per_beat;
 }
 
-Rules::Rules(float bpm, int delay)
+Rules::Rules(float bpm, int delay, bool tapping_enabled)
     : early_ms(60000.0f / bpm / 3.5f),
       late_ms(early_ms),
       release_ms(60000.0f / bpm / 2.0f),
@@ -364,7 +379,8 @@ Rules::Rules(float bpm, int delay)
       window_us(static_cast<int>(early_ms * 1000)),
       release_us(static_cast<int>(release_ms * 1000)),
       sustain_threshold_us(static_cast<int>(sustain_threshold_ms * 1000)),
-      delay_ms(delay) {}
+      delay_ms(delay),
+      tapping(tapping_enabled) {}
 
 unsigned Round::multiplier() const {
     return 1 + std::min(streak / 10, 3u);
@@ -448,6 +464,11 @@ Pick Round::advance(const Chart &chart, int time_ms, uint8_t held, const Rules &
     return Pick::neutral;
 }
 
+uint8_t Round::required_frets(const Chart &chart, int time_ms, const Rules &rules) const {
+    const auto target = required_target(chart, time_ms, rules);
+    return target < chart.size() ? chart[target].frets : 0;
+}
+
 Pick Round::pick(const Chart &chart, int time_ms, uint8_t held, const Rules &rules, bool tap) {
     if (!tap && !held) {
         pending_pick_ms_ = time_ms + 30;
@@ -459,7 +480,7 @@ Pick Round::pick(const Chart &chart, int time_ms, uint8_t held, const Rules &rul
 
     const auto target = required_target(chart, time_ms, rules);
     const bool matched = target < chart.size() && matches(chart[target].frets, held);
-    if (tap && (!streak || !matched || !chart[target].hopo)) {
+    if (tap && (!rules.tapping || !streak || !matched || !chart[target].hopo)) {
         return Pick::neutral;
     }
     if (sustain_frets && sustain_tappable_ && target == chart.size() && last_pick_ms_ &&
@@ -512,7 +533,7 @@ Pick Round::pick(const Chart &chart, int time_ms, uint8_t held, const Rules &rul
     sustain_end_ms_ = static_cast<int>(sustain_end_us_ / 1000);
     sustain_length_us_ = sustain_end_us_ - note_start;
     sustain_frets = chord.frets;
-    sustain_tappable_ = chord.hopo;
+    sustain_tappable_ = rules.tapping && chord.hopo;
     return Pick::hit;
 }
 

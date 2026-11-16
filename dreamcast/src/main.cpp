@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "audio.hpp"
 #include "chart.hpp"
+#include "chooser.hpp"
+#include "language.hpp"
+#include "settings.hpp"
 #include "song_library.hpp"
 #include "view.hpp"
 
@@ -90,21 +93,33 @@ public:
         for (unsigned i = 0; i < effect_count; ++i) {
             char path[64];
             std::snprintf(path, sizeof(path), "/rd/fx/%s.ogg", names[i]);
-            // SDL mixer channels use 128 for full gain and 32 for screwupvol=0.25.
-            const unsigned volume = i >= miss1 ? 32 : 128;
-            if (!samples_[i].load(path, volume)) {
+            if (!samples_[i].load(path)) {
                 std::printf("FoFDC: could not load sound %s\n", path);
             }
         }
     }
 
     void play(Effect effect) {
+        play_at_volume(effect, effect >= miss1 ? miss_level_ : guitar_level_, effect >= miss1);
+    }
+
+    void preview(unsigned volume) {
+        play_at_volume(miss1, volume, false);
+    }
+
+    void set_mix(unsigned guitar, unsigned miss) {
+        guitar_level_ = guitar;
+        miss_level_ = miss;
+    }
+
+private:
+    void play_at_volume(Effect effect, unsigned volume, bool replace_miss) {
         const auto &clip = samples_[effect];
         if (!clip.loaded()) {
             return;
         }
         // GuitarScene replaces the last mixer channel. Other effects take the first free channel.
-        const auto target = effect >= miss1 ? voices_.end() - 1 :
+        const auto target = replace_miss ? voices_.end() - 1 :
             std::find_if(voices_.begin(), voices_.end(), [](const auto &voice) {
                 return !voice || (!voice->playing() && !voice->paused());
             });
@@ -115,11 +130,12 @@ public:
         if (!voice) {
             voice.reset(new (std::nothrow) dc::Audio);
         }
-        if (!voice || !voice->start_clip(clip)) {
+        if (!voice || !voice->start_clip(clip, volume)) {
             std::printf("FoFDC: could not play sound %u\n", effect);
         }
     }
 
+public:
     void poll() {
         for (const auto &voice : voices_) {
             if (voice && voice->playing()) {
@@ -146,6 +162,8 @@ public:
     }
 
 private:
+    unsigned guitar_level_ = 100;
+    unsigned miss_level_ = 25;
     std::array<dc::AudioClip, effect_count> samples_;
     std::array<std::unique_ptr<dc::Audio>, 8> voices_;
 };
@@ -186,13 +204,16 @@ std::vector<Cue> read_tutorial_cues() {
 }
 
 void tutorial_cue(dc::Frame &frame, const std::vector<Cue> &cues) {
+    size_t caption = 0;
     for (const auto &cue : cues) {
         const int elapsed = frame.time_ms - cue.start;
         if (elapsed < 0 || elapsed > cue.duration) {
             continue;
         }
         if (cue.picture < 0) {
-            frame.caption = cue.text.c_str();
+            if (caption < frame.tutorial_captions.size()) {
+                frame.tutorial_captions[caption++] = cue.text.c_str();
+            }
         } else {
             const float in = std::min(1.0f, elapsed / 500.0f);
             const float out = std::min(1.0f, (cue.duration - elapsed) / 500.0f);
@@ -204,13 +225,26 @@ void tutorial_cue(dc::Frame &frame, const std::vector<Cue> &cues) {
 }
 
 static dc::Audio audio;
+static dc::Audio menu_audio;
+static dc::Audio collection_audio[2];
 static dc::ResultAudio result_audio;
 static SoundEffects sounds;
+
+void service_audio_while_loading() {
+    audio.poll();
+    menu_audio.poll();
+    for (auto &preview : collection_audio) {
+        preview.poll();
+    }
+    result_audio.poll(false);
+    sounds.poll();
+}
 
 enum InputButton : unsigned {
     nav_up = 1u << 0, nav_down = 1u << 1, nav_left = 1u << 2, nav_right = 1u << 3,
     select_option = 1u << 4, cancel_option = 1u << 5, pause_song = 1u << 6,
-    pick_up = 1u << 7, pick_down = 1u << 8, pick_extra = 1u << 9
+    pick_up = 1u << 7, pick_down = 1u << 8, pick_extra = 1u << 9,
+    editor_play = 1u << 10, editor_delete = 1u << 11, editor_previous = 1u << 12, editor_next = 1u << 13
 };
 
 struct Input {
@@ -219,30 +253,43 @@ struct Input {
     uint8_t frets = 0;
 };
 
-Input read_keyboard(const kbd_state_t &keys) {
-    Input input{dc::InputDevice::keyboard};
+constexpr unsigned fret_shift = 14;
+constexpr unsigned button_mask = (1u << fret_shift) - 1;
+
+// Resolve shared bindings in the same order as Player.Controls in 1.3.110.
+std::array<unsigned, KBD_MAX_KEYS> keyboard_bindings{};
+
+void apply_keyboard_settings(const dc::Settings &settings) {
+    using K = dc::KeyAction;
+    const auto irq = irq_disable();
+    keyboard_bindings.fill(0);
+    keyboard_bindings[settings.key(K::left)] = nav_left;
+    keyboard_bindings[settings.key(K::right)] = nav_right;
+    keyboard_bindings[settings.key(K::up)] = nav_up;
+    keyboard_bindings[settings.key(K::down)] = nav_down;
+    keyboard_bindings[settings.key(K::pick)] = pick_down;
+    keyboard_bindings[settings.key(K::secondary_pick)] = pick_up;
     for (unsigned fret = 0; fret < 5; ++fret) {
-        if (keys.key_states[KBD_KEY_F1 + fret].is_down) {
-            input.frets |= 1u << fret;
-        }
+        keyboard_bindings[settings.keys[unsigned(K::fret1) + fret]] = 1u << (fret_shift + fret);
     }
-    constexpr struct {
-        kbd_key_t key;
-        unsigned buttons;
-    } bindings[] = {
-        {KBD_KEY_UP, nav_up}, {KBD_KEY_DOWN, nav_down},
-        {KBD_KEY_LEFT, nav_left}, {KBD_KEY_RIGHT, nav_right},
-        {KBD_KEY_ENTER, select_option | pick_down}, {KBD_KEY_ESCAPE, cancel_option | pause_song}
-    };
-    for (const auto &binding : bindings) {
-        if (keys.key_states[binding.key].is_down) {
-            input.buttons |= binding.buttons;
-        }
+    keyboard_bindings[settings.key(K::cancel)] = cancel_option | pause_song;
+    keyboard_bindings[KBD_KEY_ENTER] |= select_option;
+    keyboard_bindings[KBD_KEY_SPACE] |= editor_play;
+    keyboard_bindings[KBD_KEY_DEL] |= editor_delete;
+    keyboard_bindings[KBD_KEY_PGUP] |= editor_previous;
+    keyboard_bindings[KBD_KEY_PGDOWN] |= editor_next;
+    irq_restore(irq);
+}
+
+Input read_keyboard(const kbd_state_t &keys) {
+    unsigned held = 0;
+    for (const auto key : keys.cond.keys) {
+        held |= keyboard_bindings[key];
     }
-    if (keys.cond.modifiers.raw & KBD_MOD_RSHIFT) {
-        input.buttons |= pick_up;
+    for (unsigned mods = keys.cond.modifiers.raw; mods; mods &= mods - 1) {
+        held |= keyboard_bindings[0xe0 + unsigned(__builtin_ctz(mods))];
     }
-    return input;
+    return {dc::InputDevice::keyboard, held & button_mask, uint8_t(held >> fret_shift)};
 }
 
 Input read_input() {
@@ -309,6 +356,17 @@ public:
         if (!keys) {
             return;
         }
+        if (capturing_key_ && !captured_key_) {
+            const auto held = raw_keys(keys);
+            for (const auto key : held) {
+                if (dc::valid_key(key) && std::find(raw_baseline_.begin(), raw_baseline_.end(), key) ==
+                                          raw_baseline_.end()) {
+                    captured_key_ = key;
+                    break;
+                }
+            }
+            raw_baseline_ = held;
+        }
         const auto state = read_keyboard(*keys);
         if (state.buttons == previous_.buttons && state.frets == previous_.frets) {
             return;
@@ -322,6 +380,32 @@ public:
             ++overflow;
         }
         reports_[written_++ % reports_.size()] = {state, timestamp_us, pressed, pressed_frets, released_frets};
+    }
+
+    void capture_next_key() {
+        const auto irq = irq_disable();
+        raw_baseline_ = raw_keys(kbd_get_state(maple_enum_type(0, MAPLE_FUNC_KEYBOARD)));
+        capturing_key_ = true;
+        captured_key_ = 0;
+        irq_restore(irq);
+    }
+
+    void stop_key_capture() {
+        const auto irq = irq_disable();
+        capturing_key_ = false;
+        captured_key_ = 0;
+        irq_restore(irq);
+    }
+
+    uint8_t take_captured_key() {
+        const auto irq = irq_disable();
+        const auto key = captured_key_;
+        if (key) {
+            captured_key_ = 0;
+            capturing_key_ = false;
+        }
+        irq_restore(irq);
+        return key;
     }
 
     void reset(const Input &state) {
@@ -344,6 +428,18 @@ public:
     unsigned overflow = 0;
 
 private:
+    static std::array<uint8_t, KBD_MAX_PRESSED_KEYS + 8> raw_keys(const kbd_state_t *state) {
+        std::array<uint8_t, KBD_MAX_PRESSED_KEYS + 8> keys{};
+        if (state) {
+            std::copy(std::begin(state->cond.keys), std::end(state->cond.keys), keys.begin());
+            for (unsigned mods = state->cond.modifiers.raw; mods; mods &= mods - 1) {
+                const auto bit = unsigned(__builtin_ctz(mods));
+                keys[KBD_MAX_PRESSED_KEYS + bit] = 0xe0 + bit;
+            }
+        }
+        return keys;
+    }
+
     static void reply(maple_state_t *state, maple_frame_t *frame) {
         const auto timestamp_us = timer_us_gettime64();
         frame->callback = observer_->original_reply_;
@@ -357,6 +453,9 @@ private:
     std::array<KeyboardReport, 32> reports_{};
     unsigned read_ = 0;
     unsigned written_ = 0;
+    std::array<uint8_t, KBD_MAX_PRESSED_KEYS + 8> raw_baseline_{};
+    bool capturing_key_ = false;
+    uint8_t captured_key_ = 0;
 };
 
 KeyboardReports *KeyboardReports::observer_ = nullptr;
@@ -367,7 +466,7 @@ unsigned move_list(unsigned current, unsigned count, int direction) {
 
 enum class NameCommand { editing, accept, cancel };
 
-NameCommand read_name_keys(std::string &name, uint64_t &last_key_ms) {
+NameCommand read_name_keys(std::string &name, uint64_t &last_key_ms, size_t limit = dc::ScoreBook::max_name) {
     auto *device = maple_enum_type(0, MAPLE_FUNC_KEYBOARD);
     const auto *keyboard = kbd_get_state(device);
     if (!keyboard) {
@@ -393,11 +492,62 @@ NameCommand read_name_keys(std::string &name, uint64_t &last_key_ms) {
         mods.raw = static_cast<uint8_t>(raw >> 8);
         leds.raw = static_cast<uint8_t>(raw >> 16);
         const auto ch = static_cast<unsigned char>(kbd_key_to_ascii(key, keyboard->region, mods, leds));
-        if (ch >= 32 && ch <= 126 && name.size() < dc::ScoreBook::max_name) {
+        if (ch >= 32 && ch <= 126 && name.size() < limit) {
             name.push_back(ch);
         }
     }
     return NameCommand::editing;
+}
+
+void read_filter_keys(dc::SongChooser &chooser) {
+    auto *device = maple_enum_type(0, MAPLE_FUNC_KEYBOARD);
+    const auto *keyboard = kbd_get_state(device);
+    if (!keyboard) {
+        return;
+    }
+    for (int raw; (raw = kbd_queue_pop(device, false)) != KBD_QUEUE_END;) {
+        const auto key = static_cast<kbd_key_t>(raw & 0xff);
+        kbd_mods_t mods{};
+        kbd_leds_t leds{};
+        mods.raw = static_cast<uint8_t>(raw >> 8);
+        leds.raw = static_cast<uint8_t>(raw >> 16);
+        if (key == KBD_KEY_BACKSPACE) {
+            chooser.type('\b');
+        } else {
+            chooser.type(static_cast<unsigned char>(kbd_key_to_ascii(key, keyboard->region, mods, leds)));
+        }
+    }
+}
+
+enum class Cheat { none, autoplay, skip };
+
+Cheat read_cheat_keys(std::string &prefix, bool listen, bool *dismissed = nullptr) {
+    auto *device = maple_enum_type(0, MAPLE_FUNC_KEYBOARD);
+    if (!kbd_get_state(device)) {
+        return Cheat::none;
+    }
+    Cheat found = Cheat::none;
+    constexpr char autoplay[] = "uptomytempo";
+    constexpr char skip[] = "fastforward";
+    for (int raw; (raw = kbd_queue_pop(device, false)) != KBD_QUEUE_END;) {
+        const auto key = raw & 0xff;
+        const unsigned handled = select_option | cancel_option | (3u << fret_shift);
+        if (dismissed && (keyboard_bindings[key] & handled)) {
+            *dismissed = true;
+        }
+        if (!listen || key < KBD_KEY_A || key > KBD_KEY_Z || keyboard_bindings[key]) {
+            continue;
+        }
+        prefix += static_cast<char>('a' + key - KBD_KEY_A);
+        if (prefix == autoplay || prefix == skip) {
+            found = prefix == autoplay ? Cheat::autoplay : Cheat::skip;
+            prefix.clear();
+        } else if (std::strncmp(autoplay, prefix.c_str(), prefix.size()) != 0 &&
+                   std::strncmp(skip, prefix.c_str(), prefix.size()) != 0) {
+            prefix.clear();
+        }
+    }
+    return found;
 }
 
 struct FrameTiming {
@@ -438,22 +588,53 @@ int main() {
     KeyboardReports keyboard_reports;
     keyboard_reports.start();
     maple_wait_scan();
+    dc::Settings settings;
+    settings.load();
+    if (settings.language >= dc::Language::count()) {
+        settings.language = 0;
+    }
+    apply_keyboard_settings(settings);
     dc::ScoreBook scores;
     scores.load();
     std::printf("FoFDC: Maple report sampling at GETCOND completion\n");
     const auto tutorial = read_tutorial_cues();
-    const auto songs = dc::song_library();
+    auto songs = dc::song_library();
+    auto imports = dc::imported_song_sources();
+    dc::SongEdits edits;
+    edits.load(songs);
+    edits.load(imports);
+    for (const auto &entry : imports) {
+        if (edits.has_playable_edit(entry)) {
+            songs.push_back(entry);
+        }
+    }
+    dc::SongEditor editor;
     dc::SongChart song;
     dc::Round round;
     dc::Frame frame;
     frame.scores = &scores;
+    frame.editor = &editor;
+    frame.import_sources = &imports;
+    dc::SettingsMenu settings_menu;
+    frame.settings_menu = &settings_menu;
+    dc::SettingsWriter settings_writer;
+    bool settings_dirty = false;
+    uint64_t settings_repeat_at = 0;
+    unsigned settings_held_controls = 0;
     std::vector<int> song_difficulties(songs.size(), -1);
     size_t loaded_chart = songs.size();
     std::string load_error;
     bool training = false;
+    bool choose_for_editor = false;
+    uint64_t editor_open_ms = 0;
+    uint64_t editor_frame_ms = 0;
+    uint64_t first_bpm_tap = 0;
+    uint64_t last_bpm_tap = 0;
+    unsigned bpm_taps = 0;
     bool settings_in_pause = false;
     unsigned song_index = 1;
-    unsigned last_regular_song = 1;
+    unsigned last_regular_song = 0;
+    dc::SongChooser chooser;
     unsigned previous_buttons = 0;
     Input processed_input;
     uint8_t blocked_frets = 0;
@@ -472,28 +653,76 @@ int main() {
     uint64_t credits_start_ms = 0;
     uint64_t credits_close_ms = 0;
     float credits_visibility_at_close = 0.0f;
+    unsigned preview_channel = 0;
+    size_t preview_selection = songs.size();
+    uint64_t preview_due_ms = 0;
     bool error_to_main = false;
+    std::string cheat_prefix;
+    bool cheated = false;
+    bool autoplay = false;
+    bool skip_round = false;
+    uint8_t autoplay_frets = 0;
     FrameTiming timing;
-    frame.delay_ms = 100;
-    frame.difficulty = 2; // Player.py defaults to Easy.
+    frame.difficulty = settings.difficulty;
 
+    const auto apply_settings = [&] {
+        frame.delay_ms = settings.delay_ms;
+        frame.text_scale = settings.text_scale;
+        frame.lefty = settings.lefty;
+        frame.tapping = settings.tapping;
+        frame.language = settings.language;
+        frame.mods = settings.mods;
+        audio.set_mix(settings.guitar_level, settings.song_level, settings.rhythm_level);
+        menu_audio.set_mix(settings.guitar_level, settings.song_level, settings.rhythm_level);
+        for (auto &preview : collection_audio) {
+            preview.set_mix(settings.guitar_level, settings.song_level, settings.rhythm_level);
+        }
+        sounds.set_mix(settings.guitar_level, settings.miss_level);
+        result_audio.set_volume(settings.guitar_level);
+    };
+    const auto save_settings = [&] {
+        if (settings_dirty) {
+            settings_writer.queue(settings);
+            settings_dirty = false;
+        }
+    };
+    const auto show_settings = [&](bool in_pause) {
+        settings_held_controls = 0;
+        settings_menu.draft = settings;
+        settings_menu.open(in_pause ? dc::SettingsPage::pause_volume : dc::SettingsPage::categories);
+        settings_in_pause = in_pause;
+        frame.screen = dc::Screen::settings;
+    };
+    apply_settings();
+
+    const auto chooser_selection = [&] {
+        frame.library_item = !chooser.selected() || chooser.folder();
+        frame.selected = frame.library_item ? songs.size() : chooser.song_index();
+    };
     const auto to_setlist = [&] {
+        menu_audio.fade_out(1000);
         audio.stop();
         frame.countdown = 0;
         training = false;
+        choose_for_editor = false;
         if (songs.size() < 2) {
             frame.screen = dc::Screen::error;
             frame.error = "No songs on the disc.";
             error_to_main = true;
             return;
         }
-        song_index = last_regular_song;
+        chooser.open(songs, last_regular_song);
+        if (auto *device = maple_enum_type(0, MAPLE_FUNC_KEYBOARD)) {
+            while (kbd_queue_pop(device, false) != KBD_QUEUE_END) {}
+        }
         frame.screen = dc::Screen::setlist;
-        frame.selected = song_index;
+        chooser_selection();
     };
     const auto to_main = [&] {
         audio.stop();
+        menu_audio.stop();
         frame.countdown = 0;
+        choose_for_editor = false;
         frame.screen = dc::Screen::menu;
         frame.selected = training ? 1 : 0;
     };
@@ -501,7 +730,7 @@ int main() {
         if (loaded_chart == index) {
             return true;
         }
-        if (!dc::load_song_chart(songs[index].midi.c_str(), song, load_error)) {
+        if (!edits.open(songs[index], song, load_error)) {
             loaded_chart = songs.size();
             song_difficulties[index] = 0;
             return false;
@@ -515,6 +744,62 @@ int main() {
         }
         song_difficulties[index] = available;
         return true;
+    };
+    const auto open_editor = [&](const dc::SongEntry &entry, dc::Screen failure_screen) {
+        dc::SongChart editable;
+        if (!edits.open(entry, editable, frame.editor_text, true)) {
+            frame.screen = failure_screen;
+            std::printf("FoFDC: editor open failed midi=%s error=%s\n", entry.midi.c_str(), frame.editor_text.c_str());
+            return;
+        }
+        audio.stop();
+        editor.open(entry, std::move(editable));
+        editor_open_ms = editor_frame_ms = timer_ms_gettime64();
+        frame.editor_text.clear();
+        frame.screen = dc::Screen::editing;
+        std::printf("FoFDC: editor opened midi=%s\n", entry.midi.c_str());
+    };
+    const auto preview_editor = [&](unsigned position) {
+        const auto &entry = editor.entry();
+        const auto &instrument = entry.guitar.empty() ? entry.backing : entry.guitar;
+        return audio.prepare(instrument.c_str(), nullptr, entry.rhythm.empty() ? nullptr : entry.rhythm.c_str(),
+                             service_audio_while_loading, position) && audio.play_prepared();
+    };
+    const auto save_editor = [&] {
+        if (!editor.has_changes()) {
+            frame.editor_text = "There are no changes to save.";
+            return;
+        }
+        scores.flush();
+        const bool resume = audio.playing() && audio.pause();
+        const auto result = edits.save(editor, frame.editor_text);
+        if (resume) {
+            audio.resume();
+        }
+        if (result == dc::SongEdits::SaveResult::failed) {
+            return;
+        }
+        if (result == dc::SongEdits::SaveResult::saved) {
+            editor.mark_saved();
+        }
+        const auto identity = editor.entry().midi;
+        const auto found = std::find_if(songs.begin(), songs.end(), [&](const dc::SongEntry &entry) {
+            return entry.midi == identity;
+        });
+        if (found != songs.end()) {
+            edits.update_metadata(*found);
+            song_difficulties[found - songs.begin()] = -1;
+        } else if (edits.has_playable_edit(editor.entry())) {
+            songs.push_back(editor.entry());
+            song_difficulties.push_back(-1);
+        }
+        for (auto &entry : imports) {
+            if (entry.midi == identity) {
+                edits.update_metadata(entry);
+                break;
+            }
+        }
+        loaded_chart = songs.size();
     };
     const auto load_song = [&] {
         const auto &entry = songs[song_index];
@@ -534,24 +819,29 @@ int main() {
             frame.error = "No supported notes in this chart.";
             return;
         }
-        frame.selected = (frame.available & (1u << frame.difficulty)) ? frame.difficulty :
+        frame.selected = (frame.available & (1u << settings.difficulty)) ? settings.difficulty :
                          31 - __builtin_clz(frame.available);
         frame.screen = dc::Screen::difficulty;
         std::printf("FoFDC: loaded %s (A=%u M=%u E=%u S=%u)\n", entry.title.c_str(),
                     unsigned(song.guitar[0].size()), unsigned(song.guitar[1].size()),
                     unsigned(song.guitar[2].size()), unsigned(song.guitar[3].size()));
     };
-    const auto prepare_audio = [](const char *backing, const char *guitar = nullptr) {
-        return audio.prepare(backing, guitar, +[] {
-            result_audio.poll(false);
-            sounds.poll();
-        });
+    const auto prepare_entry = [](dc::Audio &player, const dc::SongEntry &entry) {
+        return player.prepare(entry.backing.c_str(), entry.guitar.empty() ? nullptr : entry.guitar.c_str(),
+                              entry.rhythm.empty() ? nullptr : entry.rhythm.c_str(), service_audio_while_loading);
     };
     const auto begin_countdown = [&] {
+        read_cheat_keys(cheat_prefix, false);
+        cheat_prefix.clear();
+        frame.cheat_message = nullptr;
+        cheated = autoplay = skip_round = false;
+        autoplay_frets = 0;
+        menu_audio.fade_out(1000);
+        collection_audio[preview_channel].fade_out(1000);
         frame.countdown = 0;
         const auto &entry = songs[song_index];
         const auto prep_start = timer_us_gettime64();
-        if (!prepare_audio(entry.backing.c_str(), entry.guitar.empty() ? nullptr : entry.guitar.c_str())) {
+        if (!prepare_entry(audio, entry)) {
             frame.screen = dc::Screen::error;
             frame.error = audio.error();
             return;
@@ -632,14 +922,15 @@ int main() {
     };
 
     const auto resume_menu_music = [&] {
-        audio.poll();
-        if (!audio.playing() && (!prepare_audio("/rd/menu.ogg") || !audio.play_prepared())) {
-            std::printf("FoFDC: menu audio error: %s\n", audio.error());
+        if (!menu_audio.playing() &&
+            (!menu_audio.prepare("/rd/menu.ogg", nullptr, nullptr, service_audio_while_loading) ||
+             !menu_audio.play_prepared())) {
+            std::printf("FoFDC: menu audio error: %s\n", menu_audio.error());
         }
     };
 
     const auto record_pick = [&](dc::Pick result, int when, uint8_t frets, bool after_stage_update = false) {
-        audio.guitar_gain(round.guitar_muted ? 0.0f : 1.0f);
+        audio.guitar_gain(round.guitar_muted ? 0.0f : 1.0f, result != dc::Pick::neutral);
         if (result == dc::Pick::hit) {
             trace_input(InputTrace::hit, when, round.last_hit_ms - round.last_hit_offset_ms, frets, round);
             view.record_pick(round, after_stage_update);
@@ -649,6 +940,7 @@ int main() {
     };
 
     for (;;) {
+        const auto previous_screen = frame.screen;
         const auto input = read_input();
         const bool same_device = input.device == frame.input;
         unsigned pressed = same_device && input.device == dc::InputDevice::controller ?
@@ -669,7 +961,7 @@ int main() {
                     if (pause_menu && frame.countdown <= 0 && report.released_frets &&
                         processed_input.device == dc::InputDevice::keyboard) {
                         const dc::Rules rules{60000000.0f / song.initial_us_per_beat,
-                                              frame.delay_ms + chart_delay_ms};
+                                              frame.delay_ms + chart_delay_ms, settings.tapping};
                         processed_input.frets &= ~report.released_frets;
                         trace_input(InputTrace::report, frame.time_ms, report.state.buttons,
                                     report.state.frets, round);
@@ -689,7 +981,7 @@ int main() {
                          (frame.input == dc::InputDevice::keyboard && (pressed & pick_up) ? 1 : 0);
         const int adjust = bool((pressed & nav_right) || (menu_frets & (1u << 3))) -
                            bool((pressed & nav_left) || (menu_frets & (1u << 2)));
-        frame.caption = nullptr;
+        frame.tutorial_captions = {};
         frame.tutorial_picture = -1;
 
         switch (frame.screen) {
@@ -700,14 +992,17 @@ int main() {
                 if (confirm) {
                     sounds.play(accept);
                     if (frame.selected == 5) {
+                        save_settings();
+                        settings_writer.flush();
                         scores.flush();
                         arch_menu();
                     } else if (frame.selected == 3) {
-                        settings_in_pause = false;
-                        frame.screen = dc::Screen::settings;
-                        frame.selected = 0;
+                        show_settings(false);
                     } else if (frame.selected == 4) {
-                        const bool started = audio.start("/cd/songs/defy/song.ogg", "/cd/songs/defy/guitar.ogg");
+                        menu_audio.fade_out(1000);
+                        auto &credits_audio = collection_audio[preview_channel];
+                        const bool started = credits_audio.prepare("/cd/songs/defy/song.ogg", "/cd/songs/defy/guitar.ogg",
+                                                                   nullptr, service_audio_while_loading) && credits_audio.play_prepared();
                         credits_start_ms = timer_ms_gettime64();
                         credits_close_ms = 0;
                         frame.credits = {};
@@ -724,35 +1019,139 @@ int main() {
                             begin_countdown();
                         }
                     } else {
-                        audio.stop();
-                        error_to_main = true;
-                        frame.screen = dc::Screen::error;
-                        frame.error = "This menu is in development.";
+                        frame.editor_text.clear();
+                        frame.selected = 0;
+                        frame.screen = dc::Screen::editor_menu;
                     }
                 } else if (cancel) {
+                    save_settings();
+                    settings_writer.flush();
                     scores.flush();
                     arch_menu();
                 }
                 break;
-            case dc::Screen::settings:
+            case dc::Screen::settings: {
+                using P = dc::SettingsPage;
+                using S = dc::Setting;
                 if (!settings_in_pause) {
                     resume_menu_music();
                 }
-                frame.selected = move_list(frame.selected, 3, step);
-                toggle(step || adjust);
-                if (frame.selected == 0) {
-                    frame.delay_ms = std::clamp(frame.delay_ms + 10 * adjust, -250, 250);
-                } else if (frame.selected == 1) {
-                    frame.board_speed = std::clamp(frame.board_speed + 5 * adjust, 50, 200);
+                if (settings_menu.capture) {
+                    const auto key = keyboard_reports.take_captured_key();
+                    if (key || (input.device == dc::InputDevice::controller && cancel)) {
+                        const auto action = settings_menu.row(settings_menu.selected).action;
+                        if (key && key != KBD_KEY_ESCAPE && key != settings.key(dc::KeyAction::cancel) &&
+                            key != settings.key(dc::KeyAction::fret2)) {
+                            settings.keys[unsigned(action)] = settings_menu.draft.keys[unsigned(action)] = key;
+                            apply_keyboard_settings(settings);
+                            keyboard_reports.reset(read_input());
+                            settings_dirty = true;
+                            sounds.play(accept);
+                            std::printf("FoFDC: Maple binding action=%u key=%02x\n", unsigned(action), key);
+                        } else {
+                            sounds.play(back);
+                        }
+                        keyboard_reports.stop_key_capture();
+                        settings_menu.capture = false;
+                        settings_held_controls = 0;
+                    }
+                    break;
                 }
-                if (cancel || (confirm && frame.selected == 2)) {
-                    frame.selected = settings_in_pause ? 0 : 3;
-                    frame.screen = settings_in_pause ? dc::Screen::pause : dc::Screen::menu;
+                if (settings_menu.page == P::key_test ? (pressed & cancel_option) != 0 : cancel) {
                     sounds.play(back);
+                    if (!settings_menu.back()) {
+                        frame.screen = settings_in_pause ? dc::Screen::pause : dc::Screen::menu;
+                        save_settings();
+                    }
+                    settings_held_controls = 0;
+                    break;
+                }
+                if (settings_menu.page == P::key_test) {
+                    settings_menu.test_held = input.frets | (frame.strumming ? 1u << 5 : 0);
+                    break;
+                }
+                constexpr unsigned repeat_buttons = nav_up | nav_down | nav_left | nav_right | pick_up | pick_down;
+                constexpr unsigned repeat_frets = (1u << 2) | (1u << 3);
+                const auto held_controls = (input.buttons & repeat_buttons) |
+                                           ((input.frets & repeat_frets) << fret_shift);
+                unsigned repeat = 0;
+                const auto now = timer_ms_gettime64();
+                if (held_controls != settings_held_controls) {
+                    settings_held_controls = held_controls;
+                    settings_repeat_at = now + 300;
+                } else if (held_controls && now >= settings_repeat_at) {
+                    repeat = held_controls;
+                    settings_repeat_at = now + 30;
+                }
+                const unsigned ui_press = pressed | repeat;
+                const unsigned ui_frets = menu_frets | (repeat >> fret_shift);
+                const bool keyboard = frame.input == dc::InputDevice::keyboard;
+                const int settings_step = bool((ui_press & nav_down) || (keyboard && (ui_press & pick_up))) -
+                                          bool((ui_press & nav_up) || (keyboard && !(input.buttons & select_option) &&
+                                                                      !confirm && (ui_press & pick_down)));
+                const int settings_adjust = bool((ui_press & nav_right) || (ui_frets & (1u << 3))) -
+                                            bool((ui_press & nav_left) || (ui_frets & (1u << 2)));
+                if (settings_step) {
+                    settings_menu.move(settings_step);
+                    toggle(settings_step);
+                }
+                const auto &option = settings_menu.row(settings_menu.selected);
+                const auto setting = option.setting;
+                auto &draft = settings_menu.draft;
+                if (dc::adjust_setting(draft, setting, settings_adjust, dc::Language::count())) {
+                    if (setting == S::lefty || setting == S::tapping) {
+                        settings.lefty = draft.lefty;
+                        settings.tapping = draft.tapping;
+                        settings_dirty = true;
+                        apply_settings();
+                    }
+                    if (dc::setting_is_volume(setting)) {
+                        if (settings_in_pause) {
+                            settings.guitar_level = draft.guitar_level;
+                            settings.song_level = draft.song_level;
+                            settings.rhythm_level = draft.rhythm_level;
+                            settings.miss_level = draft.miss_level;
+                            settings_dirty = true;
+                            apply_settings();
+                        }
+                        const unsigned level = setting == S::guitar ? draft.guitar_level :
+                                               setting == S::song ? draft.song_level :
+                                               setting == S::rhythm ? draft.rhythm_level : draft.miss_level;
+                        sounds.preview(level);
+                    }
+                }
+                if (!confirm) {
+                    break;
+                }
+                sounds.play(accept);
+                switch (setting) {
+                    case S::game: settings_menu.open(P::game); break;
+                    case S::mods: settings_menu.open(P::mods); break;
+                    case S::keys: settings_menu.open(P::keys); break;
+                    case S::video: settings_menu.open(P::video); break;
+                    case S::audio: settings_menu.open(P::audio); break;
+                    case S::volume: settings_menu.open(P::volume); break;
+                    case S::test_keys: settings_menu.open(P::key_test); break;
+                    case S::binding:
+                        if (input.device == dc::InputDevice::keyboard) {
+                            settings_menu.capture = true;
+                            keyboard_reports.capture_next_key();
+                        }
+                        break;
+                    case S::apply:
+                        settings = draft;
+                        settings_dirty = true;
+                        apply_settings();
+                        save_settings();
+                        training = false;
+                        to_main();
+                        menu_audio.stop();
+                        break;
+                    default: break;
                 }
                 break;
+            }
             case dc::Screen::credits: {
-                audio.poll();
                 const uint64_t now = timer_ms_gettime64();
                 frame.credits.elapsed_ms = unsigned(now - credits_start_ms);
                 constexpr float transition_ms = dc::credits_transition_ms;
@@ -772,18 +1171,46 @@ int main() {
                 }
                 break;
             }
-            case dc::Screen::setlist:
-                frame.selected = 1 + move_list(frame.selected - 1, songs.size() - 1, step);
-                toggle(step);
-                if (confirm) {
-                    song_index = last_regular_song = frame.selected;
-                    sounds.play(accept);
-                    load_song();
+            case dc::Screen::setlist: {
+                const bool quiet = !collection_audio[preview_channel].playing();
+                if (frame.input == dc::InputDevice::keyboard) {
+                    read_filter_keys(chooser);
+                }
+                chooser.move(step);
+                if (quiet) {
+                    toggle(step);
+                }
+                if (confirm && chooser.matches()) {
+                    if (quiet) {
+                        sounds.play(accept);
+                    }
+                    if (!chooser.enter()) {
+                        if (choose_for_editor) {
+                            open_editor(songs[chooser.song_index()], dc::Screen::setlist);
+                        } else {
+                            song_index = last_regular_song = chooser.song_index();
+                            load_song();
+                        }
+                    }
                 } else if (cancel) {
-                    sounds.play(back);
-                    to_main();
+                    if (quiet) {
+                        sounds.play(back);
+                    }
+                    if (!chooser.parent()) {
+                        if (choose_for_editor) {
+                            choose_for_editor = false;
+                            frame.selected = 0;
+                            frame.screen = dc::Screen::editor_menu;
+                        } else {
+                            to_main();
+                        }
+                    }
+                }
+                if (frame.screen == dc::Screen::setlist) {
+                    chooser_selection();
                 }
                 break;
+            }
             case dc::Screen::difficulty:
                 if (step) {
                     do {
@@ -793,6 +1220,9 @@ int main() {
                 toggle(step);
                 if (confirm) {
                     frame.difficulty = frame.selected;
+                    settings_dirty |= settings.difficulty != frame.difficulty;
+                    settings.difficulty = frame.difficulty;
+                    save_settings();
                     begin_countdown();
                 } else if (cancel) {
                     sounds.play(back);
@@ -800,7 +1230,7 @@ int main() {
                 }
                 break;
             case dc::Screen::countdown:
-                if (pressed & pause_song) {
+                if ((pressed & pause_song) && !frame.cheat_message) {
                     show_pause();
                 }
                 break;
@@ -843,9 +1273,7 @@ int main() {
                 } else if (confirm && frame.selected == 2) {
                     to_setlist();
                 } else if (confirm && frame.selected == 3) {
-                    settings_in_pause = true;
-                    frame.screen = dc::Screen::settings;
-                    frame.selected = 0;
+                    show_settings(true);
                 } else if (confirm) {
                     to_main();
                 }
@@ -897,7 +1325,7 @@ int main() {
                 }
                 if (!frame.results_actions) {
                     if (confirm || cancel || (frame.input == dc::InputDevice::keyboard && (pressed & pick_up))) {
-                        if (scores.qualifies(record_song, frame.difficulty, round.score)) {
+                        if (!cheated && scores.qualifies(record_song, frame.difficulty, round.score)) {
                             kbd_set_repeat_timing(300, 30);
                             if (auto *device = maple_enum_type(0, MAPLE_FUNC_KEYBOARD)) {
                                 while (kbd_queue_pop(device, false) != KBD_QUEUE_END) {}
@@ -937,8 +1365,194 @@ int main() {
                     error_to_main ? to_main() : to_setlist();
                 }
                 break;
+            case dc::Screen::editor_menu:
+                resume_menu_music();
+                frame.selected = move_list(frame.selected, 3, step);
+                toggle(step);
+                if (cancel) {
+                    to_main();
+                    frame.selected = 2;
+                } else if (confirm) {
+                    sounds.play(accept);
+                    frame.editor_text.clear();
+                    if (frame.selected == 0) {
+                        to_setlist();
+                        choose_for_editor = frame.screen == dc::Screen::setlist;
+                    } else {
+                        frame.selected = 0;
+                        frame.screen = dc::Screen::editor_import;
+                    }
+                }
+                break;
+            case dc::Screen::editor_import:
+                resume_menu_music();
+                if (cancel) {
+                    frame.selected = 1;
+                    frame.editor_text.clear();
+                    frame.screen = dc::Screen::editor_menu;
+                } else if (!imports.empty()) {
+                    frame.selected = move_list(frame.selected, imports.size(), step);
+                    toggle(step);
+                    if (confirm) {
+                        menu_audio.fade_out(1000);
+                        open_editor(imports[frame.selected], dc::Screen::editor_import);
+                    }
+                }
+                break;
+            case dc::Screen::editing: {
+                const auto now = timer_ms_gettime64();
+                const auto elapsed = std::min<uint64_t>(100, now - editor_frame_ms);
+                editor_frame_ms = now;
+                const bool was_playing = audio.playing();
+                audio.poll();
+                if (was_playing) {
+                    editor.follow_audio(audio.position_ms());
+                }
+                if (pressed & cancel_option) {
+                    editor.end_note();
+                    frame.selected = 0;
+                    frame.screen = dc::Screen::editor_actions;
+                    break;
+                }
+                const int difficulty_step = bool(pressed & editor_next) - bool(pressed & editor_previous);
+                if (difficulty_step) {
+                    editor.change_difficulty(difficulty_step);
+                }
+                const int lane_step = bool(pressed & nav_down) - bool(pressed & nav_up);
+                if (lane_step) {
+                    editor.move_lane(lane_step);
+                }
+                const int time_step = bool(pressed & nav_right) - bool(pressed & nav_left);
+                if (time_step && !audio.playing()) {
+                    editor.move_quarter(time_step);
+                }
+                if (pressed & editor_delete) {
+                    editor.remove_note();
+                }
+                const unsigned picks = input.device == dc::InputDevice::keyboard ? (pick_up | pick_down) : pick_extra;
+                if (pressed & picks) {
+                    editor.begin_note(input.frets | menu_frets);
+                }
+                if (pressed & editor_play) {
+                    if (audio.playing()) {
+                        audio.stop();
+                    } else if (!preview_editor(editor.position_ms())) {
+                        frame.editor_text = audio.error();
+                        frame.selected = 0;
+                        frame.screen = dc::Screen::editor_message;
+                    }
+                }
+                const int held = bool(input.buttons & nav_right) - bool(input.buttons & nav_left);
+                editor.update(elapsed, held, input.buttons & picks || input.frets, audio.playing());
+                break;
+            }
+            case dc::Screen::editor_actions:
+                frame.selected = move_list(frame.selected, 10, step);
+                toggle(step);
+                if (cancel) {
+                    editor_frame_ms = timer_ms_gettime64();
+                    frame.screen = dc::Screen::editing;
+                } else if (confirm) {
+                    sounds.play(accept);
+                    if (frame.selected == 9) {
+                        to_main();
+                        frame.selected = 2;
+                    } else if (frame.selected == 0) {
+                        save_editor();
+                        frame.screen = dc::Screen::editor_message;
+                    } else if (frame.selected == 4) {
+                        first_bpm_tap = last_bpm_tap = bpm_taps = 0;
+                        frame.editor_text.clear();
+                        preview_editor(0);
+                        frame.screen = dc::Screen::editor_tempo;
+                    } else if (frame.selected == 7) {
+                        frame.editor_text = "Cassette label editing is unavailable.";
+                        frame.screen = dc::Screen::editor_message;
+                    } else if (frame.selected == 8) {
+                        frame.editor_text.clear();
+                        frame.screen = dc::Screen::editor_message;
+                    } else {
+                        if (auto *device = maple_enum_type(0, MAPLE_FUNC_KEYBOARD)) {
+                            while (kbd_queue_pop(device, false) != KBD_QUEUE_END) {}
+                        }
+                        frame.editor_text = editor.field(frame.selected);
+                        frame.screen = dc::Screen::editor_value;
+                    }
+                }
+                break;
+            case dc::Screen::editor_value: {
+                const auto command = read_name_keys(frame.editor_text, name_key_ms, 60);
+                if (command == NameCommand::cancel || cancel) {
+                    frame.screen = dc::Screen::editor_actions;
+                } else if (command == NameCommand::accept || confirm) {
+                    if (editor.set_field(frame.selected, frame.editor_text)) {
+                        frame.screen = dc::Screen::editor_actions;
+                    } else {
+                        frame.editor_text = "Invalid value.";
+                        frame.screen = dc::Screen::editor_message;
+                    }
+                }
+                break;
+            }
+            case dc::Screen::editor_tempo:
+                if (pressed & editor_play) {
+                    last_bpm_tap = timer_ms_gettime64();
+                    if (!bpm_taps++) {
+                        first_bpm_tap = last_bpm_tap;
+                    }
+                    if (last_bpm_tap > first_bpm_tap) {
+                        char bpm[20];
+                        std::snprintf(bpm, sizeof(bpm), "%.2f", 60000.0 * (bpm_taps - 1) / (last_bpm_tap - first_bpm_tap));
+                        frame.editor_text = bpm;
+                    }
+                }
+                if (cancel || (confirm && bpm_taps > 1 && editor.set_field(4, frame.editor_text))) {
+                    audio.stop();
+                    frame.screen = dc::Screen::editor_actions;
+                }
+                break;
+            case dc::Screen::editor_message:
+                if (confirm || cancel) {
+                    frame.screen = dc::Screen::editor_actions;
+                }
+                break;
         }
 
+        if (frame.screen >= dc::Screen::editor_actions && audio.playing()) {
+            audio.poll();
+            if (frame.screen != dc::Screen::editor_tempo) {
+                editor.follow_audio(audio.position_ms());
+                editor.update(0, 0, false, true);
+            }
+        }
+        frame.editor_playing = audio.playing();
+        if (frame.screen >= dc::Screen::editing) {
+            frame.editor_age_ms = timer_ms_gettime64() - editor_open_ms;
+        }
+
+        bool dismiss_cheat = false;
+        if (frame.screen == dc::Screen::play || frame.screen == dc::Screen::countdown) {
+            const auto cheat = read_cheat_keys(cheat_prefix, !frame.cheat_message,
+                                                frame.cheat_message ? &dismiss_cheat : nullptr);
+            if (frame.cheat_message && (confirm || cancel || dismiss_cheat)) {
+                dismiss_cheat = true;
+                frame.cheat_message = nullptr;
+            }
+            if (cheat != Cheat::none) {
+                cheated = true;
+                if (cheat == Cheat::skip) {
+                    skip_round = true;
+                    frame.countdown = 0.0f;
+                    frame.screen = dc::Screen::play;
+                } else {
+                    autoplay = !autoplay;
+                    autoplay_frets = 0;
+                    frame.cheat_message = autoplay ? "Jurgen will show you how it is done." :
+                                                    "Jurgen has left the building.";
+                }
+                std::printf("FoFDC: cheat %s\n", cheat == Cheat::skip ? "results" : autoplay ? "Jurgen on" : "Jurgen off");
+            }
+        }
         const bool pause_layer = frame.screen == dc::Screen::pause ||
                                  (frame.screen == dc::Screen::settings && settings_in_pause);
         const bool interactive = frame.screen == dc::Screen::play;
@@ -958,12 +1572,16 @@ int main() {
             audio.poll();
             frame.time_ms = audio.position_ms() - frame.delay_ms - chart_delay_ms;
             const dc::Rules rules{60000000.0f / song.initial_us_per_beat,
-                                  frame.delay_ms + chart_delay_ms};
+                                  frame.delay_ms + chart_delay_ms, settings.tapping};
             if (audio.error()) {
                 frame.screen = dc::Screen::error;
                 frame.error = audio.error();
-            } else if (!audio.playing()) {
-                round.finish(chart, frame.time_ms, rules);
+            } else if (skip_round || !audio.playing()) {
+                if (skip_round) {
+                    audio.stop();
+                } else {
+                    round.finish(chart, frame.time_ms, rules);
+                }
                 const unsigned stars = round.rating(frame.gems);
                 const char *result_clip = nullptr;
                 if (!round.score) {
@@ -997,14 +1615,21 @@ int main() {
                 std::printf("FoFDC: gems=%u/%u stars=%u frame_max_us=%u over25=%u over50=%u\n",
                             round.gem_hits, frame.gems, stars, timing.max_us, timing.over_25_ms, timing.over_50_ms);
                 std::printf("FoFDC: input_queue_overflow=%u\n", keyboard_reports.overflow);
-            } else {
-                if (songs[song_index].tutorial) {
-                    tutorial_cue(frame, tutorial);
+                pvr_stats_t pvr_stats{};
+                if (pvr_get_stats(&pvr_stats) == 0) {
+                    std::printf("FoFDC: pvr_vertex_peak=%u vram_free=%u aica_free=%u heap_used=%u\n",
+                                unsigned(pvr_stats.vtx_buffer_used_max), unsigned(pvr_mem_available()),
+                                unsigned(snd_mem_available()), unsigned(mallinfo().uordblks));
                 }
+            } else {
                 const auto process_input = [&](Input state, int when, uint8_t releases = 0) {
                     trace_input(InputTrace::report, when, state.buttons, state.frets, round);
                     if (state.device == processed_input.device) {
                         const auto edges = state.buttons & ~processed_input.buttons;
+                        if (frame.cheat_message || dismiss_cheat) {
+                            processed_input.buttons = state.buttons;
+                            return true;
+                        }
                         if (edges & pause_song) {
                             return false;
                         }
@@ -1048,7 +1673,16 @@ int main() {
                 } else if (interactive) {
                     keep_playing = process_input(input, frame.time_ms);
                 }
-                record_pick(round.advance(chart, frame.time_ms, processed_input.frets, rules),
+                if (autoplay && keep_playing) {
+                    const uint8_t required = round.required_frets(chart, frame.time_ms, rules);
+                    if (required && required != autoplay_frets) {
+                        record_pick(round.pick(chart, frame.time_ms, required, rules, false),
+                                    frame.time_ms, required);
+                    }
+                    autoplay_frets = required;
+                }
+                record_pick(round.advance(chart, frame.time_ms,
+                                          autoplay ? autoplay_frets : processed_input.frets, rules),
                             frame.time_ms, processed_input.frets, true);
                 trace_input(InputTrace::advance, frame.time_ms, 0, processed_input.frets, round);
                 processed_time = frame.time_ms;
@@ -1066,19 +1700,65 @@ int main() {
 
         dc_gameplay_active = frame.screen == dc::Screen::play;
         if (frame.screen == dc::Screen::play || (frame.screen == dc::Screen::pause && frame.countdown <= 0)) {
-            frame.held = processed_input.frets;
+            if (songs[song_index].tutorial) {
+                tutorial_cue(frame, tutorial);
+            }
+            frame.held = autoplay ? autoplay_frets : processed_input.frets;
             frame.strumming = processed_input.buttons & (pick_up | pick_down | pick_extra);
         }
         record_round(round, frame.time_ms);
+        if (previous_screen == dc::Screen::menu && frame.screen != dc::Screen::menu &&
+            frame.screen != dc::Screen::settings) {
+            menu_audio.fade_out(1000);
+        }
+        if ((previous_screen == dc::Screen::setlist && frame.screen != dc::Screen::setlist) ||
+            (previous_screen == dc::Screen::credits && frame.screen != dc::Screen::credits)) {
+            collection_audio[preview_channel].fade_out(1000);
+        }
+        if (frame.screen == dc::Screen::setlist) {
+            const size_t selection = frame.library_item ? songs.size() : frame.selected;
+            const auto now = timer_ms_gettime64();
+            if (previous_screen != frame.screen || preview_selection != selection) {
+                preview_selection = selection;
+                preview_due_ms = now + 1024;
+            } else if (preview_due_ms && now >= preview_due_ms && selection < songs.size()) {
+                preview_due_ms = 0;
+                auto &outgoing = collection_audio[preview_channel];
+                auto &incoming = collection_audio[preview_channel ^ 1u];
+                outgoing.fade_out(1000);
+                if (prepare_entry(incoming, songs[selection]) && incoming.play_prepared()) {
+                    outgoing.stop(); // Loading the next track replaces SDL_mixer's music channel.
+                    preview_channel ^= 1u;
+                    std::printf("FoFDC: preview %s\n", songs[selection].title.c_str());
+                } else {
+                    std::printf("FoFDC: preview unavailable: %s\n", incoming.error());
+                }
+            }
+        }
         result_audio.poll(frame.screen == dc::Screen::results);
         sounds.poll();
-        scores.poll();
-        if (frame.screen == dc::Screen::setlist) {
-            if (song_difficulties[frame.selected] < 0) {
-                read_chart(frame.selected);
-            }
-            frame.available = song_difficulties[frame.selected];
+        menu_audio.poll();
+        for (auto &preview : collection_audio) {
+            preview.poll();
         }
-        view.draw(frame, song, round, songs);
+        scores.poll();
+        settings_writer.poll();
+        if (frame.screen == dc::Screen::setlist) {
+            frame.available = 0;
+            if (!frame.library_item) {
+                if (song_difficulties[frame.selected] < 0) {
+                    read_chart(frame.selected);
+                }
+                frame.available = song_difficulties[frame.selected];
+            }
+            auto display = frame;
+            display.selected = chooser.selected();
+            display.library_generation = chooser.generation();
+            display.search = chooser.query();
+            display.filter_match = chooser.matches();
+            view.draw(display, song, round, chooser.items());
+        } else {
+            view.draw(frame, song, round, songs);
+        }
     }
 }
