@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <new>
 #include <arch/timer.h>
 #include <dc/sound/aica_comm.h>
@@ -19,6 +20,21 @@ namespace {
 
 constexpr unsigned backing_volume = 255; // Frets on Fire defaults songvol to 1.0.
 constexpr unsigned cd_read_buffer_size = 16 * 1024;
+constexpr unsigned clip_sample_rate = 44100;
+
+bool read_pcm(OggVorbis_File &decoder, int16_t *samples, unsigned bytes) {
+    auto *output = reinterpret_cast<char *>(samples);
+    unsigned offset = 0;
+    while (offset < bytes) {
+        int section = 0;
+        const auto got = ov_read(&decoder, output + offset, bytes - offset, 0, 2, 1, &section);
+        if (got <= 0) {
+            return false;
+        }
+        offset += static_cast<unsigned>(got);
+    }
+    return true;
+}
 
 struct AicaCommand {
     alignas(32) uint32_t packet[AICA_CMDSTR_CHANNEL_SIZE]{};
@@ -37,8 +53,83 @@ struct AicaCommand {
 
 } // namespace
 
+bool AudioClip::load(const char *path, unsigned volume) {
+    auto *file = std::fopen(path, "rb");
+    if (!file) {
+        return false;
+    }
+    std::unique_ptr<OggVorbis_File> decoder(new (std::nothrow) OggVorbis_File{});
+    if (!decoder || ov_open(file, decoder.get(), nullptr, 0) != 0) {
+        std::fclose(file);
+        return false;
+    }
+    const auto *info = ov_info(decoder.get(), 0);
+    const auto frames = ov_pcm_total(decoder.get(), 0);
+    if (ov_streams(decoder.get()) != 1 || !info || info->channels != 2 || info->rate != clip_sample_rate ||
+        frames <= 0 || frames >= std::numeric_limits<unsigned>::max() / 4 - Audio::block_frames) {
+        ov_clear(decoder.get());
+        return false;
+    }
+    const auto stride = (unsigned(frames) + Audio::block_frames - 1) & ~(Audio::block_frames - 1);
+    decltype(pcm_) pcm(static_cast<int16_t *>(memalign(32, stride * 2 * sizeof(int16_t))), &std::free);
+    if (!pcm) {
+        ov_clear(decoder.get());
+        return false;
+    }
+    int16_t interleaved[Audio::block_frames * 2];
+    auto *left = pcm.get();
+    auto *right = left + stride;
+    const int gain = std::min(volume, 128u);
+    for (unsigned offset = 0; offset < frames; offset += Audio::block_frames) {
+        const auto count = std::min(Audio::block_frames, unsigned(frames) - offset);
+        if (!read_pcm(*decoder, interleaved, count * 2 * sizeof(int16_t))) {
+            ov_clear(decoder.get());
+            return false;
+        }
+        for (unsigned i = 0; i < count; ++i) {
+            left[offset + i] = interleaved[2 * i] * gain / 128;
+            right[offset + i] = interleaved[2 * i + 1] * gain / 128;
+        }
+    }
+    std::fill(left + frames, left + stride, 0);
+    std::fill(right + frames, right + stride, 0);
+    ov_clear(decoder.get());
+    pcm_ = std::move(pcm);
+    stride_ = stride;
+    frames_ = unsigned(frames);
+    return true;
+}
+
 bool Audio::start(const char *backing, const char *guitar) {
     return prepare(backing, guitar) && play_prepared();
+}
+
+bool Audio::start_clip(const AudioClip &clip) {
+    stop();
+    if (!clip.pcm_) {
+        error_ = "Audio effect not loaded.";
+        return false;
+    }
+    if (snd_init() < 0) {
+        error_ = "AICA initialization failed.";
+        return false;
+    }
+    error_ = nullptr;
+    rate_ = clip_sample_rate;
+    guitar_volume_ = 255;
+    auto &stem = stems_[0];
+    stem.clip = &clip;
+    stem.channels = 2;
+    stem.frames = length_frames_ = clip.frames_;
+    if (!allocate_channels(stem)) {
+        stop();
+        return false;
+    }
+    for (unsigned block = 0; block < blocks; ++block) {
+        fill(stem, block);
+    }
+    begin_stream(0);
+    return true;
 }
 
 bool Audio::prepare(const char *backing, const char *guitar, PrepareService service) {
@@ -147,6 +238,10 @@ bool Audio::open(Stem &stem, const char *path, PrepareService service) {
     stem.channels = static_cast<unsigned>(info->channels);
     stem.frames = static_cast<unsigned>(frames);
     stem.decoded = 0;
+    return allocate_channels(stem);
+}
+
+bool Audio::allocate_channels(Stem &stem) {
     for (unsigned i = 0; i < stem.channels; ++i) {
         stem.channel[i] = snd_sfx_chn_alloc();
         stem.address[i] = snd_mem_malloc(ring_frames * sizeof(int16_t));
@@ -161,26 +256,35 @@ bool Audio::open(Stem &stem, const char *path, PrepareService service) {
 bool Audio::decode(Stem &stem, unsigned count) {
     const auto frames = std::min(count, stem.frames - stem.decoded);
     const unsigned bytes = frames * stem.channels * sizeof(int16_t);
-    auto *pcm = reinterpret_cast<char *>(decoded_);
-    unsigned offset = 0;
-    while (offset < bytes) {
-        int section = 0;
-        const auto got = ov_read(&stem.decoder, pcm + offset, bytes - offset, 0, 2, 1, &section);
-        if (got <= 0) {
-            return false;
-        }
-        offset += static_cast<unsigned>(got);
+    if (!read_pcm(stem.decoder, decoded_, bytes)) {
+        return false;
     }
     stem.decoded += frames;
-    std::memset(pcm + offset, 0, (count - frames) * stem.channels * sizeof(int16_t));
+    std::memset(decoded_ + frames * stem.channels, 0, (count - frames) * stem.channels * sizeof(int16_t));
     return true;
 }
 
 bool Audio::fill(Stem &stem, unsigned block) {
+    const auto block_bytes = block_frames * sizeof(int16_t);
+    if (stem.clip) {
+        const auto *clip = stem.clip;
+        const unsigned frames = std::min(block_frames, clip->frames_ - stem.decoded);
+        for (unsigned channel = 0; channel < stem.channels; ++channel) {
+            auto *samples = clip->pcm_.get() + channel * clip->stride_ + stem.decoded;
+            // Resuming an effect can start the ring at a sample not aligned for store queues.
+            if (frames != block_frames || ((stem.decoded * sizeof(int16_t)) & 31)) {
+                std::copy_n(samples, frames, split_[channel]);
+                std::fill(split_[channel] + frames, split_[channel] + block_frames, 0);
+                samples = split_[channel];
+            }
+            spu_memload_sq(stem.address[channel] + block * block_bytes, samples, block_bytes);
+        }
+        stem.decoded += frames;
+        return true;
+    }
     if (!decode(stem, block_frames)) {
         return false;
     }
-    const auto block_bytes = block_frames * sizeof(int16_t);
     if (stem.channels == 1) {
         spu_memload_sq(stem.address[0] + block * block_bytes, decoded_, block_bytes);
     } else {
@@ -265,7 +369,7 @@ void Audio::poll() {
     }
     for (auto block = old_block; block < (played_frames_ - ring_origin_) / block_frames; ++block) {
         for (auto &stem : stems_) {
-            if (stem.open && !fill(stem, block % blocks)) {
+            if (stem.channels && !fill(stem, block % blocks)) {
                 fail("Error decoding the audio track.");
                 return;
             }
@@ -318,6 +422,16 @@ bool Audio::pause() {
 bool Audio::resume() {
     if (!paused_) {
         return false;
+    }
+
+    auto &clip = stems_[0];
+    if (clip.clip) {
+        clip.decoded = played_frames_;
+        for (unsigned block = 0; block < blocks; ++block) {
+            fill(clip, block);
+        }
+        begin_stream(played_frames_);
+        return true;
     }
 
     // Completed blocks have already been refilled. The unread PCM wraps from
@@ -389,6 +503,7 @@ void Audio::stop() {
         }
         stem.file = nullptr;
         stem.service = nullptr;
+        stem.clip = nullptr;
         std::free(stem.read_buffer);
         stem.read_buffer = nullptr;
         stem.channels = stem.frames = stem.decoded = 0;
@@ -406,10 +521,23 @@ void ResultAudio::schedule(const char *path) {
     scheduled_ms_ = timer_ms_gettime64();
 }
 
+void ResultAudio::pause() {
+    if (playing()) {
+        audio_->poll();
+        audio_->pause();
+    }
+}
+
+void ResultAudio::resume() {
+    if (audio_ && audio_->paused()) {
+        audio_->resume();
+    }
+}
+
 void ResultAudio::poll(bool results_visible) {
     if (audio_) {
         audio_->poll();
-        if (!audio_->playing()) {
+        if (!audio_->playing() && !audio_->paused()) {
             audio_.reset();
         }
     }

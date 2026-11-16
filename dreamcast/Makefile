@@ -1,5 +1,6 @@
 TARGET = FretsOnFire_Dreamcast.elf
 SOURCES = src/main.cpp src/audio.cpp src/chart.cpp src/song_library.cpp src/view.cpp
+SOURCES += src/credits.cpp src/records.cpp
 OBJECTS = $(SOURCES:.cpp=.o) romdisk.o
 KOS_ROMDISK_DIR = build/romdisk
 CXXFLAGS += -std=c++17 -Wall -Wextra -MMD -MP

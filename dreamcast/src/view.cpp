@@ -52,15 +52,16 @@ uint32_t shade(uint32_t color, float level, float light = 0.0f) {
            (channel((color >> 8) & 255) << 8) | channel(color & 255);
 }
 
-uint32_t lane_color(float lane) {
+uint32_t lane_color(float lane, float intensity) {
     const float position = std::clamp(lane, 0.0f, 4.0f);
     const auto index = static_cast<unsigned>(position);
     const auto low = fret_colors[index];
     const auto high = fret_colors[std::min(index + 1, 4u)];
     const float fraction = position - index;
-    const auto channel = [low, high, fraction](unsigned shift) {
-        return static_cast<uint32_t>(((low >> shift) & 255) * (1 - fraction) +
-                                     ((high >> shift) & 255) * fraction);
+    const auto channel = [low, high, fraction, intensity](unsigned shift) {
+        const float value = ((low >> shift) & 255) * (1 - fraction) +
+                            ((high >> shift) & 255) * fraction;
+        return static_cast<uint32_t>(value * intensity + 0.5f);
     };
     return (channel(16) << 16) | (channel(8) << 8) | channel(0);
 }
@@ -135,6 +136,9 @@ bool View::load_texture(TextureId id, const char *name, bool opaque, bool repeat
     ctx.txr.uv_clamp = repeat ? PVR_UVCLAMP_NONE : PVR_UVCLAMP_UV;
     if (!opaque) {
         ctx.depth.write = PVR_DEPTHWRITE_DISABLE;
+        if (id == glow) {
+            ctx.depth.comparison = PVR_DEPTHCMP_ALWAYS;
+        }
         ctx.txr.env = PVR_TXRENV_MODULATEALPHA;
         if (additive) {
             ctx.blend.dst = PVR_BLEND_ONE;
@@ -144,7 +148,8 @@ bool View::load_texture(TextureId id, const char *name, bool opaque, bool repeat
     return true;
 }
 
-bool View::load_mesh(const char *name, Mesh &mesh) {
+template <typename Shape>
+bool View::load_mesh(const char *name, Shape &mesh) {
     auto *file = std::fopen(name, "rb");
     if (!file) {
         return false;
@@ -157,7 +162,7 @@ bool View::load_mesh(const char *name, Mesh &mesh) {
     mesh.resize(count);
     for (auto &face : mesh) {
         if (std::fread(&face.count, 4, 1, file) != 1 || face.count < 3 || face.count > 4 ||
-            std::fread(face.vertices.data(), sizeof(MeshVertex), face.count, file) != face.count) {
+            std::fread(face.vertices.data(), sizeof(face.vertices[0]), face.count, file) != face.count) {
             std::fclose(file);
             return false;
         }
@@ -178,7 +183,7 @@ bool View::init() {
     }
     pvr_set_bg_color(0.2f, 0, 0);
     constexpr const char *names[] = {
-        "keyboard", "pose", "logo", "cassette-bg", "editor-bg", "cassette-front", "cassette-above", "cassette-below",
+        "keyboard", "pose", "logo", "cassette-bg", "editor-bg",
         "label-bangbang", "label-defy", "label-twibmpg", "stage",
         "stage-lights-left", "stage-lights-right", "stage-drums", "stage-bass",
         "stage-speakers", "stage-cones", "stage-crowd-left", "stage-crowd-right", "stage-beam",
@@ -190,7 +195,8 @@ bool View::init() {
     for (unsigned i = 0; i < texture_count; ++i) {
         const auto id = static_cast<TextureId>(i);
         const bool additive = id == glow || id == stage_beam || (id >= mult2 && id <= mult4);
-        if (!load_texture(id, names[i], id == stage, id == neck, additive)) {
+        const bool repeat = id == neck || (id >= label_bangbang && id <= label_twibmpg);
+        if (!load_texture(id, names[i], id == stage, repeat, additive)) {
             return false;
         }
     }
@@ -206,33 +212,59 @@ bool View::init() {
     pvr_poly_compile(&glow_header_, &context);
     return file_bytes("/rd/theme/font.map", widths_.data(), widths_.size()) &&
            file_bytes("/rd/theme/title-font.map", digit_widths_.data(), digit_widths_.size()) &&
+           prepare_cassette_mesh("/rd/theme/cassette-shell.mesh", cassette_shell_) &&
+           prepare_cassette_mesh("/rd/theme/cassette-reels.mesh", cassette_reels_) &&
+           load_mesh("/rd/theme/cassette-sticker.mesh", cassette_sticker_) &&
            prepare_note_mesh("/rd/theme/notes.mesh", regular_note_) &&
            prepare_note_mesh("/rd/theme/hopo.mesh", tap_marker_) &&
            prepare_frets();
 }
 
 bool View::prepare_frets() {
-    Mesh shape;
-    if (!load_mesh("/rd/theme/keys.mesh", shape)) {
+    if (!load_mesh("/rd/theme/keys.mesh", fret_model_)) {
         return false;
     }
-    const auto count = std::accumulate(shape.begin(), shape.end(), size_t{},
+    const auto count = std::accumulate(fret_model_.begin(), fret_model_.end(), size_t{},
         [](size_t sum, const Face &face) { return sum + face.count; });
-    for (unsigned lane = 0; lane < frets_.size(); ++lane) {
-        for (unsigned held = 0; held < frets_[lane].size(); ++held) {
-            auto &vertices = frets_[lane][held];
+    releasing_fret_.reserve(count);
+    constexpr float weights[] = {0.0f, 0.5f, 0.75f};
+    for (unsigned lane = 0; lane < fret_vertices_.size(); ++lane) {
+        for (unsigned i = 0; i < std::size(weights); ++i) {
+            auto &vertices = fret_vertices_[lane][i];
             vertices.reserve(count);
-            const float depressed = held * 0.5f;
-            const auto color = shade(fret_colors[lane], 0.86f, 0.08f + depressed);
-            for (const auto &face : shape) {
-                for (unsigned i = 0; i < face.count; ++i) {
-                    vertices.push_back(mesh_vertex(face.vertices[i], lane_x(lane), depressed / 6, 0,
-                                                   color, i + 1 == face.count));
-                }
-            }
+            fret_vertices(lane, weights[i], vertices);
         }
     }
     return true;
+}
+
+void View::fret_vertices(unsigned lane, float weight, std::vector<pvr_vertex_t> &vertices) const {
+    const float x = lane_x(lane);
+    const float y = weight / 6.0f;
+    vertices.clear();
+    for (const auto &face : fret_model_) {
+        for (unsigned i = 0; i < face.count; ++i) {
+            const auto &point = face.vertices[i];
+            const float light = point.shade;
+            const auto color = shade(fret_colors[lane], 0.8f * light, (0.1f + weight) * light);
+            vertices.push_back(project(x + point.x, y + point.y, point.z, 0, 0,
+                                       color, i + 1 == face.count));
+        }
+    }
+}
+
+void View::update_frets(const Frame &frame, const Round &round) {
+    const auto now = timer_ms_gettime64();
+    const float ticks = static_cast<float>(now - fret_time_ms_);
+    fret_time_ms_ = now;
+    for (unsigned lane = 0; lane < fret_weights_.size(); ++lane) {
+        const auto bit = 1u << lane;
+        fret_weights_[lane] = frame.held & bit ? 0.5f :
+                              std::max(0.0f, fret_weights_[lane] - ticks / 64.0f);
+        auto &activity = fret_activities_[lane];
+        activity = round.sustain_frets & bit ? std::min(1.0f, activity + ticks / 32.0f) :
+                                             std::max(0.0f, activity - ticks / 64.0f);
+    }
 }
 
 bool View::prepare_note_mesh(const char *name, NoteMesh &mesh) {
@@ -251,7 +283,7 @@ bool View::prepare_note_mesh(const char *name, NoteMesh &mesh) {
                 mesh.points.push_back(position);
             }
             for (unsigned lane = 0; lane < corner.colors.size(); ++lane) {
-                corner.colors[lane] = shade(shade(fret_colors[lane], 0.8f, 0.1f), vertex.shade);
+                corner.colors[lane] = shade(fret_colors[lane], 0.8f * vertex.shade, 0.1f * vertex.shade);
             }
             mesh.corners.push_back(corner);
         }
@@ -265,19 +297,27 @@ void View::reset_effects() {
     beat_lanes_.fill(0);
     recent_pick_count_ = 0;
     beat_lane_count_ = 1;
-    stage_beat_period_ = 500.0f;
+    stage_bpm_ = 50.0f;
+    stage_target_bpm_ = 50.0f;
+    stage_beat_period_ = 1200.0f;
+    stage_tempo_ = 0;
     stage_beat_ = 0;
     last_stage_beat_ms_ = -1;
     last_multiplier_ms_ = -1;
-    guitar_time_origin_ms_ = timer_ms_gettime64();
+    guitar_time_origin_ms_ = fret_time_ms_ = timer_ms_gettime64();
+    fret_weights_.fill(0);
+    fret_activities_.fill(0);
 }
 
-void View::record_pick(const Round &round) {
+void View::record_pick(const Round &round, bool after_stage_update) {
     const auto frets = round.last_hit_frets;
     if (!frets) {
         return;
     }
-    update_stage(round.last_hit_ms, stage_beat_period_);
+    // Keyboard callbacks precede Stage.run. The delayed-pick timeout runs after it.
+    if (after_stage_update) {
+        update_stage_beat(round.last_hit_ms);
+    }
     unsigned lane_total = 0;
     for (unsigned lane = 0; lane < 5; ++lane) {
         if (frets & (1u << lane)) {
@@ -408,11 +448,6 @@ void View::title_number(float y, const char *digits, float size, uint32_t color)
     };
     line(left + 1.92f, y + 1.92f, color & 0xff000000);
     line(left, y, color);
-}
-
-pvr_vertex_t View::mesh_vertex(const MeshVertex &point, float x, float y, float z,
-                               uint32_t color, bool last) {
-    return project(x + point.x, y + point.y, z + point.z, 0, 0, shade(color, point.shade), last);
 }
 
 void View::note_mesh(NoteMesh &mesh, unsigned lane, float z) {
@@ -563,26 +598,56 @@ void View::world(const Frame &f, const SongChart &song, const Round &round, cons
     }
 
     const auto *held = round.sustaining_chord(chart);
-    const auto recent = f.time_ms - round.last_hit_ms;
-    const float guitar_time_ms = held ? timer_ms_gettime64() - guitar_time_origin_ms_ : 0.0f;
-    for (unsigned lane = 0; lane < 5; ++lane) {
-        const bool sustained = held && (held->frets & (1u << lane)) &&
-                               held->ends[lane] >= f.time_ms;
-        if (sustained) {
-            draw_tail_wave(lane, *held, f.time_ms, period_ms, guitar_time_ms);
+    const auto guitar_time = static_cast<float>(fret_time_ms_ - guitar_time_origin_ms_);
+    if (held) {
+        for (unsigned lane = 0; lane < fret_activities_.size(); ++lane) {
+            if (held->frets & (1u << lane)) {
+                draw_tail_wave(lane, *held, f.time_ms, period_ms, guitar_time);
+            }
         }
-        if (sustained || ((round.last_hit_frets & (1u << lane)) && recent < 170)) {
-            const auto p = project(lane_x(lane), 0.10f, 0.0f, 0, 0, white, false, 0.01f);
-            const float strength = sustained ? 0.8f : 0.9f * (1.0f - std::max(0, recent) / 170.0f);
-            rotated_sprite(glow, p.x, p.y, 104, 78, f.time_ms * 0.01f, p.z,
-                           tint(fret_colors[lane], strength));
+    }
+    draw_fret_glows(f, held);
+}
+
+void View::draw_fret_glows(const Frame &frame, const Chord *held) {
+    const float time = static_cast<float>(fret_time_ms_ - guitar_time_origin_ms_);
+    const float pulse = shz_cosf(held ? matrix_pi + (time - held->time_ms) * 0.01f : time * 0.01f);
+    constexpr float radians = matrix_pi / 180.0f;
+    for (unsigned lane = 0; lane < fret_activities_.size(); ++lane) {
+        const float activity = fret_activities_[lane];
+        if (activity == 0.0f) {
+            continue;
+        }
+        material(textures_[glow].header);
+        const float x = lane_x(lane);
+        const float weight = fret_weights_[lane];
+        float y = (weight + (frame.strumming && weight > 0.0f ? 0.25f : 0.0f)) / 6.0f;
+        float angle = (activity + 0.1f * time) * radians;
+        float radius = 0.22f * (activity + 1.5f) * activity;
+        for (unsigned layer = 0; layer < 3; ++layer) {
+            const float strength = (1.0f - layer * 0.2f) * activity * pulse * 0.25f + 0.75f;
+            const auto color = shade(fret_colors[lane], strength);
+            const auto rotation = shz_sincosf(angle);
+            pvr_vertex_t strip[4];
+            for (unsigned i = 0; i < 4; ++i) {
+                const float u = i & 1;
+                const float v = i / 2;
+                const float dx = u > 0 ? radius : -radius;
+                const float dz = v > 0 ? radius : -radius;
+                strip[i] = project(x + dx * rotation.cos + dz * rotation.sin, y,
+                                   -dx * rotation.sin + dz * rotation.cos, u, 1.0f - v, color, i == 3);
+            }
+            pvr_prim(strip, sizeof(strip));
+            y += strength * 0.2f;
+            radius *= 0.8f;
+            angle += strength * 20.0f * radians;
         }
     }
 }
 
-void View::update_stage(int time_ms, float beat_period) {
-    stage_beat_period_ = beat_period;
-    const int beat = int(time_ms / beat_period);
+void View::update_stage_beat(int time_ms) {
+    stage_beat_period_ = 60000.0f / stage_bpm_;
+    const int beat = int(4.0f * time_ms / stage_beat_period_) / 4;
     if (beat <= stage_beat_) {
         return;
     }
@@ -595,6 +660,26 @@ void View::update_stage(int time_ms, float beat_period) {
     }
     // Stage.triggerBeat copies the previous average into the next beat slot.
     beat_lanes_[beat_lane_count_ - 1] = beat_lanes_[beat_lane_count_ - 2];
+}
+
+void View::update_stage(int time_ms, const SongChart &song) {
+    update_stage_beat(time_ms);
+    // Guitar.run uses the target found in the previous draw. Guitar.renderNotes
+    // then discovers BPM changes, deferring later events until a full beat past them.
+    stage_bpm_ += 0.03f * (stage_target_bpm_ - stage_bpm_);
+    const float period = 60000.0f / stage_bpm_;
+    while (stage_tempo_ < song.tempos.size()) {
+        const auto &tempo = song.tempos[stage_tempo_];
+        const bool same_time = stage_tempo_ && tempo.time_ms == song.tempos[stage_tempo_ - 1].time_ms;
+        if (!same_time) {
+            if (tempo.time_ms >= time_ms + 5.0f * period ||
+                (stage_tempo_ && time_ms - tempo.time_ms <= period)) {
+                break;
+            }
+            stage_target_bpm_ = 60000000.0f / tempo.us_per_beat;
+        }
+        ++stage_tempo_;
+    }
 }
 
 void View::stage_decoration(int time_ms) {
@@ -618,10 +703,12 @@ void View::stage_decoration(int time_ms) {
     layer(stage_speakers, 0.7f, 0.0f, 213 * speaker_scale, 179 * speaker_scale);
     layer(stage_cones, 0.67f, -0.03f, 118 * beat_scale(0.07f), 125 * beat_scale(0.07f));
     const float right_phase = pulse(0.25f);
-    layer(stage_crowd_left, -0.8f + 0.04f * beat_phase * shz_sinf(matrix_pi * beat_phase),
-          0.4f + 0.08f * beat_phase * shz_cosf(matrix_pi * beat_phase), 278, 248);
-    layer(stage_crowd_right, 0.8f + 0.02f * right_phase * shz_sinf(2 * matrix_pi * right_phase),
-          0.4f + 0.06f * right_phase * shz_cosf(2 * matrix_pi * right_phase), 172, 223);
+    const auto crowd_left = shz_sincosf(matrix_pi * beat_phase);
+    const auto crowd_right = shz_sincosf(2 * matrix_pi * right_phase);
+    layer(stage_crowd_left, -0.8f + 0.04f * beat_phase * crowd_left.sin,
+          0.4f + 0.08f * beat_phase * crowd_left.cos, 278, 248);
+    layer(stage_crowd_right, 0.8f + 0.02f * right_phase * crowd_right.sin,
+          0.4f + 0.06f * right_phase * crowd_right.cos, 172, 223);
 }
 
 void View::stage_lights(const Frame &frame, const Round &round) {
@@ -631,7 +718,7 @@ void View::stage_lights(const Frame &frame, const Round &round) {
     constexpr float light_angle[] = {0.0f, -12.0f, -16.0f, 0.0f, 12.0f, 19.0f};
     constexpr float miss_angle[] = {10.0f, -10.0f, 7.0f, 12.0f, -5.0f, -5.0f};
     constexpr float miss_period[] = {75.0f, 100.0f, 150.0f, 250.0f, 200.0f, 150.0f};
-    const float recent = recent_pick_count_ ? 1.0f - std::clamp(
+    const float recent = recent_pick_count_ && round.last_hit_ms ? 1.0f - std::clamp(
         (frame.time_ms - round.last_hit_ms) / 500.0f, 0.0f, 1.0f) : 0.0f;
     const auto miss = frame.time_ms - round.last_miss_ms;
     for (unsigned i = 0; i < 6; ++i) {
@@ -639,7 +726,7 @@ void View::stage_lights(const Frame &frame, const Round &round) {
         if (beat_lane_count_ < channel + 2) {
             continue;
         }
-        const auto color = tint(shade(lane_color(beat_lanes_[channel]), 0.50f + 0.35f * recent), 0.7f);
+        const auto color = tint(lane_color(beat_lanes_[channel], 0.50f + 0.35f * recent), 0.7f);
         const float phase = std::clamp(miss / miss_period[i], 0.0f, 1.0f);
         const float impulse = i == 5 ? 1.0f - phase : 1.0f - shz_cosf(matrix_pi * (1.0f - phase));
         rotated_sprite(stage_beam, 320 + 320 * light_x[i], 240 + 240 * light_y[i],
@@ -725,8 +812,12 @@ void View::menu_backdrop(const Frame &frame) {
     const float phase = (timer_ms_gettime64() % 251327) / 5000.0f;
     const float zoom = shz_sinf(phase / 8) + 2;
     if (frame.screen == Screen::setlist) {
-        rotated_sprite(cassette_bg, 320 + 160 * shz_sinf(phase / 2), 240 - 120 * shz_cosf(phase),
-                       350 * zoom, 223 * zoom, phase, 0.01f);
+        const float age = cassette_frame_ms_ ? cassette_frame_ms_ - cassette_enter_ms_ : 0;
+        const float t = age / 5000.0f;
+        const float hidden = 1.0f - std::min(1.0f, age / 512.0f);
+        const float scale = shz_sinf(t / 8) + 2;
+        rotated_sprite(cassette_bg, 320 + 1280 * hidden * hidden + 160 * shz_sinf(t / 2),
+                       240 - 120 * shz_cosf(t), 350 * scale, 223 * scale, t, 0.01f);
     } else if (frame.screen == Screen::difficulty) {
         rotated_sprite(editor_bg, 320 + 160 * shz_sinf(phase / 2), 240 - 120 * shz_cosf(phase),
                        1457 * zoom, 402 * zoom, phase, 0.01f);
@@ -736,35 +827,205 @@ void View::menu_backdrop(const Frame &frame) {
     }
 }
 
+void View::credits(const CreditsFrame &frame) {
+    constexpr float view_width = 640.0f;
+    constexpr float view_height = 480.0f;
+    constexpr float line_height = 35.0f * 0.002f * view_width;  // SDL_ttf default.ttf at 22 px
+    const float scroll_progress = frame.elapsed_ms / 5000.0f;
+    const float offset = 1.0f - scroll_progress;
+    const float hidden = 1.0f - frame.visibility;
+    const float slide = hidden * hidden * view_width;
+    const float phase = scroll_progress + 34.0f;
+    const float zoom = shz_sinf(phase / 8.0f) + 3.0f;
+    const float x = 320.0f + 160.0f * shz_cosf(phase / 2.0f) + 2.0f * slide;
+    const float y = 240.0f - 120.0f * shz_sinf(phase);
+    constexpr TextureId backgrounds[] = {editor_bg, keyboard, cassette_bg};
+    constexpr float widths[] = {1457, 958, 350};
+    constexpr float heights[] = {402, 272, 223};
+    for (unsigned i = 0; i < std::size(backgrounds); ++i) {
+        const float cycle = offset + i * 2.0f;
+        const float wrap = cycle - 6.0f * std::floor(cycle / 6.0f);
+        rotated_sprite(backgrounds[i], x, y + view_height * (wrap - 3.0f), widths[i] * zoom,
+                       heights[i] * zoom, -0.5f * shz_sinf(phase * 4.0f + i), 0.01f + i * 0.001f);
+    }
+
+    float top = offset * view_width;
+    for (const auto &line : credits_lines()) {
+        if (top >= view_height) {
+            break;
+        }
+        const float height = line.text ? line_height * line.scale : 160.0f;
+        if (top + height > 0.0f) {
+            if (!line.text) {
+                rotated_sprite(logo, 320.0f, top + height * 0.5f, 572, 138, 0, menu_depth);
+            } else if (line.text[0] != ' ' || line.text[1] != '\0') {
+                const float scale = line.scale * main_font;
+                float left = 64.0f;
+                if (line.align == CreditAlign::center) {
+                    left = 320.0f;
+                } else if (line.align == CreditAlign::right) {
+                    left = 576.0f;
+                    for (const char *p = line.text; *p; ++p) {
+                        left -= scale * widths_[*p - ' '];
+                    }
+                }
+                text(left - slide, top, line.text, scale, line.gold ? gold : yellow,
+                     line.align == CreditAlign::center);
+            }
+        }
+        top += height;
+    }
+}
+
+void View::fit_text(float x, float y, const char *line, float width, float size, uint32_t color,
+                    float depth_offset) {
+    unsigned advance = 0;
+    for (auto *character = line; *character; ++character) {
+        const auto ch = static_cast<unsigned char>(*character);
+        advance += widths_[ch >= 32 && ch < 127 ? ch - 32 : '?' - 32];
+    }
+    if (advance) {
+        text(x, y, line, std::min(size, width / advance), color, false, depth_offset);
+    }
+}
+
+void View::score_stars(float x, float y, float size, unsigned count, uint32_t color) {
+    for (unsigned i = 0; i < 5; ++i) {
+        const auto id = i < count ? star : star_off;
+        sprite(id, x + i * size, y, size, size * 0.96f, menu_depth, 0, 1, 1, 0, color);
+    }
+}
+
+View::TextureId View::cassette_label(const SongEntry &song) const {
+    if (song.midi == "/cd/songs/bangbang/notes.mid") return label_bangbang;
+    if (song.midi == "/cd/songs/defy/notes.mid") return label_defy;
+    if (song.midi == "/cd/songs/twibmpg/notes.mid") return label_twibmpg;
+    return texture_count;
+}
+
+bool View::prepare_cassette_mesh(const char *name, CassetteMesh &mesh) {
+    Mesh shape;
+    if (!load_mesh(name, shape)) {
+        return false;
+    }
+    for (const auto &face : shape) {
+        if (face.count != 3) {
+            return false;  // The cassette mesh consists solely of triangles.
+        }
+        for (unsigned i = 0; i < face.count; ++i) {
+            const auto &vertex = face.vertices[i];
+            const auto shared = std::find_if(mesh.points.begin(), mesh.points.end(),
+                [&](const MeshVertex &point) {
+                    return point.x == vertex.x && point.y == vertex.y && point.z == vertex.z &&
+                           point.shade == vertex.shade;
+                });
+            mesh.corners.push_back(static_cast<uint16_t>(shared - mesh.points.begin()));
+            if (shared == mesh.points.end()) {
+                mesh.points.push_back(vertex);
+            }
+        }
+    }
+    mesh.projected.resize(mesh.points.size());
+    return true;
+}
+
+void View::update_cassettes(const Frame &frame, size_t songs) {
+    if (frame.screen != Screen::setlist || !frame.selected || frame.selected >= songs) {
+        cassette_frame_ms_ = 0;
+        return;
+    }
+    const auto now = timer_ms_gettime64();
+    if (!cassette_frame_ms_ || cassettes_.size() != songs) {
+        cassette_frame_ms_ = cassette_enter_ms_ = now;
+        cassette_camera_ = cassette_target_ = 0.0f;
+        cassettes_.assign(songs, {});
+    }
+    const float dt = std::min<uint64_t>(now - cassette_frame_ms_, 192);
+    cassette_frame_ms_ = now;
+    cassette_camera_ += (cassette_target_ - cassette_camera_) * dt / 192.0f;
+
+    float y = 0.0f;
+    for (size_t i = 1; i < songs; ++i) {  // The Tutorial opens from the main menu.
+        auto &item = cassettes_[i];
+        item.angle = std::clamp(item.angle + (i == frame.selected ? dt : -dt) * 0.5f, 0.0f, 90.0f);
+        const float height = 0.8f + 3.2f * shz_sinf_deg(item.angle);
+        item.center_y = y + height / 2;
+        y += height;
+    }
+    cassettes_[frame.selected].label_loaded = true;
+    cassette_target_ = cassettes_[frame.selected].center_y;
+}
+
+void View::draw_cassettes(const Frame &frame, const std::vector<SongEntry> &library, bool stickers) {
+    if (!cassette_frame_ms_) {
+        return;
+    }
+    const float age = cassette_frame_ms_ - cassette_enter_ms_;
+    const float hidden = 1.0f - std::min(1.0f, age / 512.0f);
+    const float camera_slide = 10.0f * hidden * hidden * hidden * hidden;
+    if (camera_slide > 7.0f) {
+        return;  // The group starts outside the left edge of the view.
+    }
+    const size_t first = std::max(1u, frame.selected - 1);
+    const size_t last = std::min(library.size(), size_t(frame.selected + 2));
+    for (size_t i = first; i < last; ++i) {
+        const auto &pose = cassettes_[i];
+        const auto turn = shz_sincosf_deg(pose.angle);
+        const float center = cassette_camera_ - pose.center_y;
+        const auto project = [&](const MeshVertex &point, float u, float v, uint32_t color, bool end) {
+            const float rx = turn.cos * point.x - turn.sin * point.y + 10.0f - camera_slide;
+            const float ry = turn.sin * point.x + turn.cos * point.y + center;
+            const float rz = point.z - 4.0f - camera_slide;
+            // SongChooser's camera looks from (-10,y,4) toward (0,y,2.5) with a 60-degree FOV.
+            constexpr float forward_x = 0.98893635f;
+            constexpr float side_x = 0.14834045f;
+            const float depth = 1.0f / (forward_x * rx - side_x * rz);
+            const float sx = 320.0f + focus * (side_x * rx + forward_x * rz) * depth;
+            return pvr_vertex_t{end ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX,
+                                sx, 240.0f - focus * ry * depth, depth, u, v,
+                                shade(color, point.shade), 0};
+        };
+        if (stickers) {
+            const auto label = cassette_label(library[i]);
+            if (label == texture_count || !pose.label_loaded) {
+                continue;
+            }
+            material(textures_[label].header);
+            for (const auto &face : cassette_sticker_) {
+                pvr_vertex_t strip[4];
+                for (unsigned k = 0; k < face.count; ++k) {
+                    const auto &v = face.vertices[k];
+                    strip[k] = project(v.point, v.u, v.v, white, k + 1 == face.count);
+                }
+                pvr_prim(strip, face.count * sizeof(pvr_vertex_t));
+            }
+        } else {
+            material(mesh_header_);
+            const auto draw_shape = [&](CassetteMesh &shape, uint32_t color) {
+                for (size_t p = 0; p < shape.points.size(); ++p) {
+                    shape.projected[p] = project(shape.points[p], 0, 0, color, false);
+                }
+                unsigned corner = 0;
+                for (const auto point : shape.corners) {
+                    auto *vertex = pvr_dr_target(direct_);
+                    *vertex = shape.projected[point];
+                    if (++corner == 3) {
+                        vertex->flags = PVR_CMD_VERTEX_EOL;
+                        corner = 0;
+                    }
+                    pvr_dr_commit(vertex);
+                }
+            };
+            const auto color = library[i].cassette_color;
+            draw_shape(cassette_shell_, color ? color : (i == frame.selected ? gold : yellow));
+            draw_shape(cassette_reels_, 0xff1a1a1au);
+        }
+    }
+}
+
 void View::setlist(const Frame &frame, const std::vector<SongEntry> &library) {
     if (library.empty() || frame.selected >= library.size()) {
         return;
-    }
-    const auto style = [](const SongEntry &song) -> std::pair<uint32_t, TextureId> {
-        if (song.midi.find("/bangbang/") != std::string::npos) {
-            return {0xffff4411u, label_bangbang};
-        }
-        if (song.midi.find("/defy/") != std::string::npos) {
-            return {white, label_defy};
-        }
-        if (song.midi.find("/twibmpg/") != std::string::npos) {
-            return {0xff555555u, label_twibmpg};
-        }
-        return {0xffbbbb88u, texture_count};
-    };
-    const size_t first = frame.selected ? frame.selected - 1 : 0;
-    const size_t last = std::min(library.size(), size_t(frame.selected) + 2);
-    for (size_t i = first; i < last; ++i) {
-        const auto [color, label] = style(library[i]);
-        if (i == frame.selected) {
-            sprite(cassette_front, 0, 0, 384, 480, menu_depth, 0, 0, 1, 1, color);
-            if (label != texture_count) {
-                sprite(label, 127, 171, 192, 106, menu_depth + 0.01f);
-            }
-        } else {
-            sprite(i < frame.selected ? cassette_above : cassette_below, 0, 0, 384, 480,
-                   menu_depth, 0, 0, 1, 1, color);
-        }
     }
     text(384, 32, "Choose a Song", main_font, yellow);
     const auto wrapped = [&](const std::string &label, float y, uint32_t color) {
@@ -803,15 +1064,24 @@ void View::setlist(const Frame &frame, const std::vector<SongEntry> &library) {
     const auto &song = library[frame.selected];
     const auto after_title = wrapped(song.title, 96, gold);
     wrapped(song.artist, after_title, yellow);
-    if (style(song).second != texture_count) {
-        for (unsigned i = 0; i < 3; ++i) {
-            const float y = 320 + i * 49;
-            text(384, y, difficulties[2 - i], 0.63f * main_font, yellow);
-            text(480, y, "---", 0.63f * main_font, gold);
-            for (unsigned j = 0; j < 5; ++j) {
-                sprite(star_off, 384 + j * 16, y + 24, 16, 16, menu_depth, 0, 0, 1, 1, yellow);
+    if (frame.scores) {
+        float y = frame.available == 0x0f ? 268.8f : 320.0f;
+        constexpr float size = 0.55f * main_font;
+        for (int difficulty = 3; difficulty >= 0; --difficulty) {
+            if (!(frame.available & (1u << difficulty))) {
+                continue;
             }
-            text(480, y + 20, "---", 0.63f * main_font, gold);
+            const auto &table = frame.scores->table(song.midi, difficulty);
+            const auto *best = table.empty() ? nullptr : &table.front();
+            char points[16] = "---";
+            if (best) {
+                std::snprintf(points, sizeof(points), "%lu", static_cast<unsigned long>(best->points));
+            }
+            text(384, y, difficulties[difficulty], size, yellow);
+            fit_text(480, y, points, 150, size, gold);
+            score_stars(384, y + 24.6f, 17, best ? best->stars : 0, yellow);
+            fit_text(480, y + 24.6f, best ? best->name.c_str() : "---", 150, size, gold);
+            y += 49.3f;
         }
     }
 }
@@ -875,6 +1145,9 @@ void View::menu(const Frame &frame, const Round &round,
             item(128, 228, line, 1);
             item(128, 260, "Back", 2);
             break;
+        case Screen::credits:
+            credits(frame.credits);
+            break;
         case Screen::setlist:
             setlist(frame, library);
             break;
@@ -913,6 +1186,43 @@ void View::menu(const Frame &frame, const Round &round,
             const auto anim = [age](unsigned start, unsigned end) {
                 return std::min(1.0f, static_cast<float>(std::max(age, start)) / end);
             };
+            if (frame.results_actions) {
+                std::snprintf(line, sizeof(line), "Highest Scores (%s)", difficulties[frame.difficulty]);
+                text(320, (0.05f - slide) * 640, line, main_font, color, true);
+                if (frame.scores && frame.result_song < library.size()) {
+                    const auto &table = frame.scores->table(library[frame.result_song].midi, frame.difficulty);
+                    constexpr float size = 0.85f * main_font;
+                    float y = (0.15f + slide) * 640;
+                    unsigned row = 0;
+                    for (const auto &entry : table) {
+                        const auto row_color = tint(int(row) == frame.highscore_rank && age % 500 < 250
+                                                        ? gold : yellow, 1.0f - slide);
+                        std::snprintf(line, sizeof(line), "%u.", row + 1);
+                        text(64, y, line, size, row_color);
+                        std::snprintf(line, sizeof(line), "%lu", static_cast<unsigned long>(entry.points));
+                        fit_text(96, y, line, 120, size, row_color);
+                        score_stars(224, y + 3, 22, entry.stars, row_color);
+                        fit_text(384, y, entry.name.c_str(), 232, size, row_color);
+                        ++row;
+                        y += menu_line;
+                    }
+                    const char *notice = nullptr;
+                    switch (frame.scores->save_status()) {
+                        case ScoreBook::SaveStatus::pending: notice = "Saving scores to the VMU..."; break;
+                        case ScoreBook::SaveStatus::no_vmu: notice = "No VMU. Scores kept for this session."; break;
+                        case ScoreBook::SaveStatus::full: notice = "VMU full. Scores kept for this session."; break;
+                        case ScoreBook::SaveStatus::error: notice = "VMU error. Scores kept for this session."; break;
+                        default: break;
+                    }
+                    if (notice) {
+                        text(32, 452, notice, 0.5f * main_font, yellow);
+                    }
+                }
+                item(128, 320, "Replay", 0);
+                item(128, 365, "Change Song", 1);
+                item(128, 410, "Quit to Main Menu", 2);
+                break;
+            }
             text(320, (0.05f - slide) * 640, "Song Finished!", main_font, color, true);
             const float rise = anim(0, 1000);
             const auto score = age >= 2000 ? round.score : static_cast<unsigned>(round.score * double(anim(1000, 2000)));
@@ -935,16 +1245,36 @@ void View::menu(const Frame &frame, const Round &round,
                     }
                 }
             }
-            if (frame.results_actions) {
-                item(128, 320, "Replay", 0);
-                item(128, 365, "Change Song", 1);
-                item(128, 410, "Quit to Main Menu", 2);
-            } else if (age > 2500) {
+            if (age > 2500) {
                 const auto accuracy = frame.gems ? round.gem_hits * 100 / frame.gems : 0;
                 std::snprintf(line, sizeof(line), "Accuracy: %u%%", accuracy);
                 text(320, 352, line, main_font, color, true);
                 std::snprintf(line, sizeof(line), "Longest note streak: %u", round.best_streak);
                 text(320, 396.8f, line, main_font, color, true);
+            }
+            if (frame.results_name) {
+                const float hidden_name = 1.0f - frame.name_visibility;
+                const float name_slide = hidden_name * hidden_name;
+                const auto prompt_color = tint(yellow, 1.0f - name_slide);
+                const auto text_color = tint(gold, 1.0f - name_slide);
+                dim(1.0f - name_slide);
+                const float y = (0.33f - name_slide) * 640;
+                std::snprintf(line, sizeof(line), "%lu points is a new high score!",
+                              static_cast<unsigned long>(round.score));
+                fit_text(64, y, line, 520, main_font, prompt_color, 1.0f);
+                text(64, y + menu_line, "Please enter your name:", main_font, prompt_color, false, 1.0f);
+                const bool controller = frame.input == InputDevice::controller;
+                const auto *cursor = frame.name_cursor && frame.name_visibility > 0.9f ? "|" : "";
+                if (controller) {
+                    std::snprintf(line, sizeof(line), "%s <%c>", frame.score_name.c_str(), frame.name_wheel);
+                } else {
+                    std::snprintf(line, sizeof(line), "%s%s", frame.score_name.c_str(), cursor);
+                }
+                fit_text(64, 307.2f + 160 * name_slide, line, 520, main_font, text_color, 1.0f);
+                if (controller) {
+                    text(64, 371, "Up/Down: letter   Right: add   Left: erase   A: OK   B: cancel",
+                         0.48f * main_font, prompt_color, false, 1.0f);
+                }
             }
             break;
         }
@@ -981,8 +1311,12 @@ void View::draw(const Frame &frame, const SongChart &song, const Round &round,
     const float period = song.us_per_beat(frame.time_ms) * 0.001f;
     const float period_ms = period * 100.0f / frame.board_speed;
     const auto &chart = song.guitar[frame.difficulty];
+    update_cassettes(frame, library.size());
     NoteMeshRange meshes;
 
+    if (playing) {
+        update_frets(frame, round);
+    }
     pvr_wait_ready();
     pvr_scene_begin();
     pvr_list_begin(PVR_LIST_OP_POLY);
@@ -1013,24 +1347,36 @@ void View::draw(const Frame &frame, const SongChart &song, const Round &round,
             }
         }
         material(mesh_header_);
-        for (unsigned lane = 0; lane < frets_.size(); ++lane) {
-            const auto &vertices = frets_[lane][(frame.held >> lane) & 1u];
-            pvr_prim(vertices.data(), vertices.size() * sizeof(pvr_vertex_t));
+        for (unsigned lane = 0; lane < fret_vertices_.size(); ++lane) {
+            const float weight = fret_weights_[lane];
+            const float depressed = weight + (frame.strumming && weight > 0.0f ? 0.25f : 0.0f);
+            if (weight == 0.0f || weight == 0.5f) {
+                const auto &vertices = fret_vertices_[lane][weight == 0.0f ? 0 : (frame.strumming ? 2 : 1)];
+                pvr_prim(vertices.data(), vertices.size() * sizeof(pvr_vertex_t));
+            } else {
+                fret_vertices(lane, depressed, releasing_fret_);
+                pvr_prim(releasing_fret_.data(), releasing_fret_.size() * sizeof(pvr_vertex_t));
+            }
         }
+    } else if (frame.screen == Screen::setlist) {
+        draw_cassettes(frame, library, false);
     }
     pvr_list_finish();
 
     pvr_list_begin(PVR_LIST_TR_POLY);
     active_header_ = nullptr;
     if (playing) {
-        update_stage(frame.time_ms, period);
+        update_stage(frame.time_ms, song);
         stage_decoration(frame.time_ms);
         world(frame, song, round, chart, period_ms, meshes);
         stage_lights(frame, round);
         draw_stats(frame, round, Rules{60000000.0f / song.initial_us_per_beat});
         multiplier_effect(frame, round, song.initial_us_per_beat * 0.001f);
-    } else {
+    } else if (frame.screen != Screen::credits) {
         menu_backdrop(frame);
+        if (frame.screen == Screen::setlist) {
+            draw_cassettes(frame, library, true);
+        }
     }
     menu(frame, round, library);
     pvr_list_finish();

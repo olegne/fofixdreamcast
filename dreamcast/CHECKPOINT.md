@@ -1,6 +1,56 @@
 # Checkpoint do Frets on Fire clássico
 
-## SH4ZAM, leitura de CD, teclado e apresentação
+## Cores, efeitos originais, recordes e repertório
+
+A candidata parte de `d28932b2096461dbae8f741bda1b2171ddb20fb4` de `dreamcast-classic`. Mantém SH4ZAM, Store Queues, projeções em cache e leitura de CD alinhada. O build usa KallistiOS 2.2.1, GCC 15.1.0 e o comando do [README](README.md), com `CXXFLAGS="-std=c++17 -Wall -Wextra -Werror -MMD -MP -DFRETSONFIRE_INPUT_TRACE"` para a instrumentação de entrada. A sintaxe do build sem a macro de rastreamento também foi verificada.
+
+| Arquivo de diagnóstico | SHA-256 |
+| --- | --- |
+| FretsOnFire_Dreamcast.elf | `2cca7a32d40dfb0daa91918b243cc0b7552f97d77f5d32e71317db186578e73b` |
+| FretsOnFire_Dreamcast.cdi | `ec4fe1535b5fa14d49e8315b543d46c4975d87cbea1fc0e02b7cc11e61c1174c` |
+
+A extração da própria CDI confirmou os 26 arquivos das quatro pastas de músicas. O ROMFS do ELF e o ROMFS do executável extraído da CDI coincidiram. Os 21 efeitos Ogg do pacote incluídos no ROMFS são idênticos byte a byte aos do Linux.
+
+### Luz e cor durante a partida
+
+As malhas de notas, HOPO e trastes usam a lâmpada e os fatores de material de `note.dae` e `key.dae`. No teste com feedback OpenGL da versão 1.3.110, os 1.938 vértices amostrados das quatro partes de nota e dos três estados de traste ficaram a menos de um nível RGB8 da cor original. Antes, o maior desvio nesse teste era de 177,1 níveis. Os trastes também usam o pressionamento, o retorno progressivo após soltar e as três camadas de luz aditiva de `Guitar.renderFrets`.
+
+Os refletores usam as posições, intensidades e gatilhos de `stage.ini`, a fase do `Stage.run` e uma textura de contribuição luminosa em RGB565 direto. A intensidade da textura é o produto da luminância com o alfa do PNG original. No quadro de Defy perto de 3,0 s, o erro absoluto médio no canal verde da faixa abaixo do HUD foi de 5,48 para 3,82 níveis. O ensaio de 704 VBlanks pré-pausa registrou p95 de 29,32 ms no controle, 49,77 ms no piloto PAL8 e 27,25 ms na candidata RGB565. O piloto PAL8 foi substituído pelo RGB565. Posicionamento do cone direito, iluminação ao redor de 1,5 s, fase dos elementos do palco e transições visuais continuam em verificação.
+
+### Efeitos curtos
+
+Os 12 efeitos curtos agora são decodificados a partir dos Ogg originais para PCM estéreo de 44,1 kHz. A voz dedicada de erro substitui a anterior com ganho nominal de 25%. A navegação pode tocar duas vozes simultaneamente junto à música. A amostra combinada do ensaio isolado teve correlação superior a 0,999999998 nos dois canais e erro RMS abaixo de 0,72 nível PCM nos trechos fora da saturação. O ganho do erro foi de 0,24983, com contribuição do erro anterior abaixo de 0,000019. A candidata integrada reproduziu `out.ogg` durante a pausa em Defy e Bang Bang, com correlação de pelo menos 0,999999997 nas janelas medidas. Na prova de pausa com `fiba6` ativo, o PCM antes da fila ficou em zero no miolo da pausa. A retomada reproduziu a mesma voz, repetindo 76 a 81 amostras junto à borda de envelope, cerca de 1,8 ms.
+
+### Recordes, seleção e créditos
+
+O ranking guarda cinco resultados por faixa e dificuldade. O ensaio de ordenação usou o `SongInfo` do Linux e confirmou a ordem e o empate estável. Na CDI de teste de gravação, o teclado Maple digitou `ACE-1`, com Shift, hífen e correção por Backspace. A VMU B1 guardou a tabela, que voltou após reiniciar o Flycast. Um cancelamento manteve o nome anterior. Com VMU cheia a imagem do cartão permaneceu idêntica byte a byte, e a tabela continuou na sessão tanto sem VMU quanto com VMU cheia. Os nomes aceitam até 20 caracteres ASCII. Importação dos recordes do Linux, envio online e VMU física seguem pendentes.
+
+O seletor usa as malhas dos cassetes originais, a inclinação e o movimento de câmera. O teste Maple percorreu as três músicas e abriu a escolha de dificuldade. As três antigas texturas fixas ocupavam 384 KiB de VRAM. No probe de menu, houve 26 callbacks de apresentação em 32 VBlanks durante a transição do modelo, ante 32 no controle. Os créditos reproduzem os 80 elementos da referência e a dupla de trilhas de Defy. O teste passou pela abertura, pelo retorno via Esc e pelo retorno automático após a rolagem. Os quadros lado a lado registram diferenças de fonte e fase dos fundos. A transição de áudio dos créditos ainda pede o fade do Linux.
+
+### Repertório original completo
+
+As dez combinações jogáveis de faixa e dificuldade coincidiram nas 5.662 transições de regras com o mesmo relógio de 5 ms, incluindo omissões, erro, acordes, HOPO e soltura antecipada. As três dificuldades de cada faixa regular ficam disponíveis na seleção. O tutorial abre diretamente em Medium, como no Linux.
+
+As quatro partidas integrais na mesma CDI do Flycast abriram a faixa, passaram por pausa e retorno, exibiram o resultado e iniciaram nova partida. Na última coluna, o Linux recebeu cada relatório Maple e cada horário efetivo da sessão Dreamcast correspondente. Todos os IDs de acertos, notas e pontos coincidiram nessas reaplicações.
+
+| Faixa | Nível | Alvos no Flycast | Notas | Pontos | Atualizações idênticas no Linux |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Defy The Machine | Amazing | 611 / 614 | 658 / 662 | 99.957 | 9.053 / 9.053 |
+| Bang Bang, Mystery Man | Medium | 244 / 247 | 375 / 380 | 116.353 | 10.872 / 10.872 |
+| This Week I've Been Mostly Playing Guitar | Amazing | 544 / 550 | 651 / 661 | 138.836 | 11.517 / 11.517 |
+| Tutorial | Medium | 44 / 59 | 48 / 63 | 4.238 | 8.748 / 8.748 |
+
+O programa de teste enviou toda a sequência planejada. A fila registrou zero estouros nos quatro jogos. Em This Week, o trace Maple observou 1.800 dos 1.804 eventos enviados. Faltaram uma pressão/soltura de Enter e uma de Shift direito. As outras três sessões observaram todos os eventos enviados. A comparação controlada da tabela usa os relatórios realmente observados.
+
+As execuções Linux independentes também chegaram ao resultado e à reprise. Defy tem vídeo contínuo. Para recuperar as três outras em um ambiente com travas do OpenGL fora de tela, This Week foi gravada em EGL pbuffer com quadros pontuais. Bang Bang e Tutorial desativaram o desenho contínuo, preservando o processamento dos controles, a lógica do jogo e a saída PCM do SDL original. Os placares Linux foram 99.480, 127.509, 161.193 e 4.363 pontos, respectivamente. Os relatórios de entrada registram diferenças entre as sessões independentes. O teste da tabela usa os mesmos horários e estados das teclas.
+
+A sonda comparou os quadros válidos do callback com o PCM original antes da fila. Na captura de vídeo, o backend SDL inseriu 45, 63, 449 e 990 blocos de silêncio durante jogo ativo, respectivamente. São cortes medidos no host de captura. Em novas partidas completas sem gravação contínua de vídeo, a mesma CDI registrou três blocos em jogo em This Week e três no tutorial. A faixa Dreamcast do MP4 contém a saída SDL original de Defy, com atraso audiovisual inicial de 144,17 ms. Os arquivos de prova preservam o PCM antes da fila para análise. Os ajustes dos stems originais em quatro janelas por faixa, com os PCM Linux e Dreamcast, também estão nas provas.
+
+O [inventário](ESCOPO_LINUX.md) e a [matriz](PARIDADE.md) registram os recursos pendentes do jogo completo, incluindo editor, importadores, menus de configuração, prévia de músicas, localização e validação no console físico.
+
+## Histórico até o checkpoint SH4ZAM
+
+### SH4ZAM, leitura de CD, teclado e apresentação
 
 A candidata parte de `62374a2e4f1136136ea9c8d051ce79b3500e9419` de `dreamcast-classic`. Usa o mesmo pacote Linux Frets on Fire 1.3.110 e os mesmos charts. A verificação da própria CDI confirmou os 26 arquivos nas quatro pastas de músicas.
 
@@ -12,7 +62,7 @@ A candidata parte de `62374a2e4f1136136ea9c8d051ce79b3500e9419` de `dreamcast-cl
 
 KallistiOS 2.2.1, GCC 15.1.0 SH-4, SH4ZAM 1.0.0 da toolchain, libvorbis e libogg do kos-ports. Para a compilação de diagnóstico, o comando do [README](README.md) recebeu `CXXFLAGS="-std=c++17 -Wall -Wextra -MMD -MP -DFRETSONFIRE_INPUT_TRACE"`. A instrumentação guarda relatórios e julgamentos em RAM, sem imprimir no caminho de cada palhetada. A automação lê esse diagnóstico e envia teclado por SDL e Maple.
 
-### Desempenho
+#### Desempenho
 
 A trigonometria de desenho usa a instrução FSCA pelo SH4ZAM. Os trastes têm vértices preparados para repouso e tecla pressionada. As malhas de notas reutilizam a projeção das posições compartilhadas sem alterar a ordem de seus vértices nem a cor por face. A geometria vai em lotes e por Store Queues, com envio de novo cabeçalho apenas quando muda o material ou a lista. A rotina de cache e os limites de lote seguem as técnicas usadas nos Test15 e Test17 de Super Mario World. [SH4ZAM](https://sh4zam.com/guides/getting-started/) · [Test15](https://github.com/olegne/dcioram-bros/blob/2ebe34099ec6fc6382af01b19bb59a899c901344/docs/DESEMPENHO_TEST15.md) · [Test17](https://github.com/olegne/dcioram-bros/blob/5f5e52d29727aa2e1e8df8d887f3f75879a933f2/docs/DESEMPENHO_TEST17.md)
 
@@ -27,7 +77,7 @@ Esse ensaio compara os algoritmos de submissão no mesmo chart e estado visual, 
 
 Um buffer de leitura de 16 KiB, alinhado a 32 bytes, permite que o ISO9660 do KallistiOS leia vários setores de uma vez por DMA. No ensaio isolado de 15 segundos com os dois stems de Defy, os comandos de CD durante a decodificação foram de 436 para 108. Os hashes do PCM decodificado foram idênticos. Os dois buffers usam 32 KiB enquanto a música está aberta. A preparação e o preenchimento inicial da AICA foram movidos para antes das oito batidas, mantendo a hora exata da entrada da faixa.
 
-### Comportamento reproduzido
+#### Comportamento reproduzido
 
 - O teclado observa todos os relatórios `GETCOND` Maple completos, incluindo o Shift direito, e associa cada evento ao instante amostrado da AICA. O piloto de 36 segundos recebeu 622/622 transições e diagnosticou 170/170 alvos. As rotinas originais do Linux receberam esse traço Maple e o mesmo relógio. O resultado foi de 170 alvos, 173 gemas e 11.624 pontos nos dois motores, com pontuação idêntica nas 1.305 atualizações.
 - No teste de pausa com o mesmo cursor de 7.821 ms, soltar as casas encerrou o sustain e mudou a pontuação de 550 para 633 nas duas implementações. A tecla F5 pressionada enquanto o menu estava aberto permaneceu fora do estado da guitarra.
@@ -35,7 +85,7 @@ Um buffer de leitura de 16 KiB, alinhado a 32 bytes, permite que o ISO9660 do Ka
 - A tela de resultado tem placar flamejado, entrada das estrelas em sequência, estatísticas e menu de ações à parte. O primeiro Enter abre as ações e o segundo confirma Replay. Diálogo de nome, recordes, contraste e parte da tipografia estão pendentes.
 - Os nove efeitos de resultado são os Ogg estéreo originais de 44,1 kHz, com playback agendado após cinco segundos. O caminho usa RAM e canais AICA durante a reprodução. Um ensaio de pontuação zero confirmou a fala `jurgen1` de 5,5 segundos, incluindo áudio depois do limite anterior de 65.534 frames e coexistência com a música de menu e com a faixa da reprise. Os efeitos curtos ainda usam a conversão ADPCM de 22,05 kHz.
 
-### Partida integral e comparação das regras
+#### Partida integral e comparação das regras
 
 Foram gravadas duas partidas independentes de Defy The Machine em Amazing, com áudio das próprias execuções. A candidata no Flycast 2.7 usou fila SDL de 6.144 quadros de áudio, captura a 20 fps, renderização sem thread separada e afinidade de CPU 5–8. As duas sessões enviaram as 2.256 transições. O port registrou todas via Maple, com zero estouros de fila.
 
@@ -52,15 +102,15 @@ A candidata completou pausa, retomada, resultado e outra partida. O cursor da pa
 
 O backend de áudio inseriu 83 blocos de silêncio durante jogo ativo, sendo sete antes e 76 depois da pausa. O maior grupo contínuo em jogo ativo durou 69,66 ms. A sonda conferiu byte a byte os 8.583.168 quadros válidos no callback contra o PCM que entrou na fila. O conjunto de provas preserva a saída SDL original e a latência inicial A/V de 263,14 ms medida no Flycast daquela gravação. O áudio no Dreamcast físico, os efeitos curtos e as diferenças de apresentação listadas na [matriz](PARIDADE.md) seguem pendentes.
 
-### Repetição com renderização em thread
+#### Repetição com renderização em thread
 
 A mesma CDI, o mesmo plano de teclado e os mesmos 6.144 quadros de áudio no SDL foram usados numa repetição completa com `rend.ThreadedRendering=yes` e sem fixação de CPUs. O backend registrou 14 faltas de amostras na inicialização e zero do início da música até a reprise. Os 8.590.336 quadros válidos do callback coincidiram byte a byte com a entrada da fila. A mediana da entrega do PCM ao callback SDL foi de 160,38 ms. A mudança de configuração inclui dois fatores do host, e a latência do Dreamcast físico é uma medição pendente.
 
 O Flycast acertou 611 alvos e 658 gemas e fez 99.933 pontos e cinco estrelas nessa execução. As rotinas originais do Linux produziram os mesmos 611 IDs, gemas e pontos com os relatórios Maple e o relógio desta sessão. O placar coincidiu em 9.094 de 9.094 atualizações. O jogo registrou 9.093 quadros, 2.964 intervalos acima de 25 ms e 431 acima de 50 ms, com máximo de 109,258 ms. A nova gravação lado a lado usa esta sessão Dreamcast, com áudio original do SDL e atraso A/V inicial medido de 144,92 ms, e a sessão Linux ao vivo da tabela anterior. O arquivo de provas registra a configuração e os resultados das duas execuções Dreamcast.
 
-## Histórico até o checkpoint anterior
+### Histórico até o checkpoint anterior
 
-### Contagem, teclado e efeitos de palco
+#### Contagem, teclado e efeitos de palco
 
 A etapa usa o mesmo pacote Linux 1.3.110 e parte do commit `4c484f10902f1e91cd0f47c3568c23439ac1dba9` de `dreamcast-classic`.
 
@@ -103,7 +153,7 @@ Durante a música, o cursor ficou em 12.121 ms na pausa e retomou no mesmo ponto
 
 O aviso 2× aparece nas duas plataformas. A diferença de sequência faz a chama surgir mais cedo na execução do Dreamcast. A captura no mesmo instante musical e a captura em idades comparáveis do aviso registram essa diferença.
 
-### Histórico do checkpoint anterior
+#### Histórico do checkpoint anterior
 
 #### Proveniência
 

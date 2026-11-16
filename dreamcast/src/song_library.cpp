@@ -53,6 +53,12 @@ void read_ini(const std::string &path, SongEntry &song) {
             song.title = value;
         } else if (key == "artist") {
             song.artist = value;
+        } else if (key == "cassettecolor" && value.size() == 7 && value.front() == '#') {
+            char *end;
+            const auto color = std::strtoul(value.c_str() + 1, &end, 16);
+            if (*end == '\0' && color <= 0xffffff) {
+                song.cassette_color = 0xff000000 | static_cast<uint32_t>(color);
+            }
         } else if (key == "delay") {
             char *end;
             const auto delay = std::strtol(value.c_str(), &end, 10);

@@ -1,8 +1,7 @@
-"""Prepare short AICA effects and preserve the original streamed audio."""
+"""Copy the original audio effects and menu music."""
 
 from pathlib import Path
 import shutil
-import subprocess
 
 
 def sounds(source: Path, output: Path):
@@ -16,17 +15,7 @@ def sounds(source: Path, output: Path):
     )
     directory = output / "fx"
     directory.mkdir(parents=True, exist_ok=True)
-    for effect in effects:
-        subprocess.run(
-            [
-                "ffmpeg", "-nostdin", "-v", "error", "-y",
-                "-i", str(source / (effect + ".ogg")),
-                "-ar", "22050", "-c:a", "adpcm_yamaha",
-                str(directory / (effect + ".wav")),
-            ],
-            check=True,
-        )
-    for effect in result_effects:
+    for effect in effects + result_effects:
         name = effect + ".ogg"
         shutil.copyfile(source / name, directory / name)
     shutil.copyfile(source / "menu.ogg", output / "menu.ogg")

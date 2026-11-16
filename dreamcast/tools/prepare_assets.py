@@ -63,6 +63,23 @@ def texture(image, path, solid=False):
     path.write_bytes(struct.pack("<4H", width, height, int(not solid), 0) + words.tobytes())
 
 
+def additive_light_texture(image, path):
+    # These greyscale PNGs use GL_SRC_ALPHA, GL_ONE. Preserving the product
+    # before quantization retains the original beam intensity through filtering.
+    channel = iter(image.tobytes())
+    words = array.array("H")
+    for r, g, b, a in zip(channel, channel, channel, channel):
+        if r != g or r != b:
+            raise ValueError(f"Expected a greyscale additive texture at {path}")
+        intensity = (r * a + 127) // 255
+        red = (31 * intensity + 127) // 255
+        green = (63 * intensity + 127) // 255
+        words.append((red << 11) | (green << 5) | red)
+    if sys.byteorder != "little":
+        words.byteswap()
+    path.write_bytes(struct.pack("<4H", *image.size, 0, 0) + words.tobytes())
+
+
 def font_atlas(source, out, name):
     font = ImageFont.truetype(str(source), 25)
     alpha = Image.new("L", (512, 256))
@@ -99,14 +116,21 @@ def title_numbers(source, out):
     (out / "title-font.map").write_bytes(widths)
 
 
-def polygons(source, factors, orient=lambda p: p):
+def polygons(source, factors, orient=lambda p: p, scene_light=False):
     # key.dae lists an unused dangling #Scene before its real scene.
     document = Collada(str(source), ignore=[DaeBrokenRefError])
-    light = (0.333, 0.667, -0.667)
+    if scene_light:
+        lamp = next(node for node in document.scenes[0].nodes if any(node.objects("light")))
+        direction = orient(lamp.matrix[:3, 3])
+        length = math.sqrt(sum(v * v for v in direction))
+        light = tuple(v / length for v in direction)
+    else:
+        light = (0.333, 0.667, -0.667)
     faces = []
     for node in document.scenes[0].nodes:
         if node.id not in factors:
             continue
+        scale = math.sqrt(sum(v * v for v in node.matrix[:3, 0]))
         for geometry in node.objects("geometry"):
             for group in geometry.primitives():
                 for polygon in group:
@@ -116,7 +140,11 @@ def polygons(source, factors, orient=lambda p: p):
                         normal = orient(normal)
                         length = math.sqrt(sum(v * v for v in normal))
                         dot = sum(a * b for a, b in zip(normal, light)) / max(0.001, length)
-                        shade = factors[node.id] * (0.52 + 0.48 * max(0.0, min(1.0, dot)))
+                        # Mesh.render supplies a directional COLLADA light. OpenGL applies
+                        # the inverse scale to unit normals when GL_NORMALIZE is disabled.
+                        brightness = (0.2 + max(0.0, dot) / scale if scene_light else
+                                      0.52 + 0.48 * max(0.0, min(1.0, dot)))
+                        shade = factors[node.id] * brightness
                         verts.append((float(x), float(y), float(z), shade))
                     faces.append(verts)
     return faces
@@ -134,7 +162,7 @@ def store_mesh(faces, path):
             if len(face) == 4:
                 face = [face[i] for i in (0, 1, 3, 2)]
             for vertex in face:
-                packed.write(struct.pack("<4f", *vertex))
+                packed.write(struct.pack(f"<{len(vertex)}f", *vertex))
 
 
 def preview(faces, project, size):
@@ -143,7 +171,7 @@ def preview(faces, project, size):
     projected = [[project(x, y, z) for x, y, z, _ in face] for face in faces]
     order = sorted(range(len(faces)), key=lambda i: -sum(v[2] for v in projected[i]) / len(projected[i]))
     for i in order:
-        intensity = round(255 * sum(v[3] for v in faces[i]) / len(faces[i]))
+        intensity = min(255, round(255 * sum(v[3] for v in faces[i]) / len(faces[i])))
         draw.polygon([(x, y) for x, y, _ in projected[i]],
                      fill=(intensity, intensity, intensity, 255))
     return image
@@ -156,24 +184,39 @@ def note_preview(x, y, z):
     return 64 - 896 * x / depth, 64 - 896 * (up / depth + 0.4), depth
 
 
-def cassette_preview(x, y, z):
-    # Source SongChooser camera (-10, 0, 4), looking toward (0, 0, 2.5).
-    depth = (10 * (x + 10) - 1.5 * (z - 4)) / math.hypot(10, 1.5)
-    right = (1.5 * (x + 10) + 10 * (z - 4)) / math.hypot(10, 1.5)
-    return 320 + 415.6922 * right / depth, 240 - 415.6922 * y / depth, depth
+def cassette_faces(document, node_name, sticker=False):
+    nodes = document.scenes[0].nodes
+    lamp = next(node for node in nodes if node.id.startswith("Lamp"))
+    direction = lamp.matrix[:3, 3]
+    direction = direction / math.hypot(*direction)
+    light = next(child.light.color[0] for child in lamp.children if hasattr(child, "light"))
+    node = next(node for node in nodes if node.id == node_name)
+    scale = math.hypot(*node.matrix[:3, 0])
+    faces = []
+    for geometry in node.objects("geometry"):
+        for group in geometry.primitives():
+            for polygon in group:
+                face = []
+                for i, (point, normal) in enumerate(zip(polygon.vertices, polygon.normals)):
+                    # Mesh.py uses directional diffuse plus OpenGL's global ambient.
+                    # Normalize the bound direction, then apply the inverse model scale.
+                    dot = sum(a * b for a, b in zip(normal, direction)) / math.hypot(*normal)
+                    shade = 0.2 + light * max(0.0, dot) / scale
+                    vertex = (*point, shade)
+                    if sticker:
+                        u, v = polygon.texcoords[0][i]
+                        vertex += (u, 1.0 - v)  # SongChooser flips the label's V axis.
+                    face.append(vertex)
+                faces.append(face)
+    return faces
 
 
-def cassette_textures(data, out):
-    factors = {"Mesh_001": 1.0, "Mesh": 0.12}
-    selections = {
-        "cassette-front": lambda p: (-p[1], p[0], p[2]),
-        "cassette-above": lambda p: (p[0], p[1] + 2.4, p[2]),
-        "cassette-below": lambda p: (p[0], p[1] - 2.4, p[2]),
-    }
-    for name, orient in selections.items():
-        faces = polygons(data / "cassette.dae", factors, orient)
-        image = preview(faces, cassette_preview, (384, 480))
-        texture(image.resize((256, 256), Image.Resampling.LANCZOS), out / (name + ".tex"))
+def cassette_assets(data, out):
+    cassette = Collada(str(data / "cassette.dae"))
+    label = Collada(str(data / "label.dae"))
+    store_mesh(cassette_faces(cassette, "Mesh_001"), out / "cassette-shell.mesh")
+    store_mesh(cassette_faces(cassette, "Mesh"), out / "cassette-reels.mesh")
+    store_mesh(cassette_faces(label, "Mesh_001", sticker=True), out / "cassette-sticker.mesh")
     for song in ("bangbang", "defy", "twibmpg"):
         label = data / "songs" / song / "label.png"
         with Image.open(label) as image:
@@ -188,7 +231,11 @@ def main(data, out):
     for name, (path, size) in TEXTURES.items():
         with Image.open(data / path) as src:
             scaled = src.convert("RGBA").resize(size, Image.Resampling.LANCZOS)
-        texture(scaled, visual / (name + ".tex"))
+        destination = visual / (name + ".tex")
+        if name in ("stage-beam", "glow"):
+            additive_light_texture(scaled, destination)
+        else:
+            texture(scaled, destination)
 
     # The center 640x480 of stage.ini's 1.3x backdrop fills the viewport.
     with Image.open(data / "stage_background.png") as src:
@@ -202,16 +249,18 @@ def main(data, out):
 
     font_atlas(data / "default.ttf", visual, "font")
     title_numbers(data / "title.ttf", visual)
-    notes = polygons(data / "note.dae", {"Mesh_001": 1.0, "Mesh": 0.75, "Mesh_002": 0.25})
-    hopo = polygons(data / "note.dae", {"Mesh_003": 1.0})
+    notes = polygons(data / "note.dae", {"Mesh_001": 1.0, "Mesh": 0.75, "Mesh_002": 0.25},
+                     scene_light=True)
+    hopo = polygons(data / "note.dae", {"Mesh_003": 1.0}, scene_light=True)
     # Compose Guitar.renderFrets' Y(+90), X(-90), Z(-90) rotations in that order.
-    keys = polygons(data / "key.dae", {"Mesh": 1.0}, orient=lambda p: (p[0], p[2], -p[1]))
+    keys = polygons(data / "key.dae", {"Mesh": 1.0}, orient=lambda p: (p[0], p[2], -p[1]),
+                    scene_light=True)
     store_mesh(notes, visual / "notes.mesh")
     store_mesh(hopo, visual / "hopo.mesh")
     store_mesh(keys, visual / "keys.mesh")
     texture(preview(notes, note_preview, (128, 128)), visual / "gem.tex")
     texture(preview(notes + hopo, note_preview, (128, 128)), visual / "tap-gem.tex")
-    cassette_textures(data, visual)
+    cassette_assets(data, visual)
     sounds(data, out)
     for name in ("notes.mid", "song.ogg", "guitar.ogg", "song.ini", "script.txt"):
         shutil.copyfile(data / "songs/tutorial" / name, out / "tutorial" / name)

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -14,6 +15,7 @@ struct SongEntry {
     std::string guitar;
     int delay_ms = 0;
     bool tutorial = false;
+    uint32_t cassette_color = 0;
 };
 
 std::vector<SongEntry> song_library();
