@@ -10,6 +10,7 @@
 #include <arch/timer.h>
 #include <dc/video.h>
 #include <malloc.h>
+#include <sh4zam/shz_trig.h>
 
 namespace dc {
 namespace {
@@ -26,7 +27,7 @@ constexpr float right_edge = -2.0f;
 constexpr float focus = 415.6922f;
 constexpr float menu_depth = 5.0f;
 constexpr float main_font = 1.1264f;  // default.ttf at 22 px times .002 * 640 / atlas size
-constexpr float big_font = 5.5296f;   // title.ttf at 108 px times .002 * 640 / atlas size
+constexpr float title_font_height = 133.0f;  // SDL_ttf's title.ttf at 108 px
 constexpr float menu_y = 198.4f;      // Classic menu.pos.y is 0.31 of the logical width
 constexpr float menu_line = 45.0f;    // Classic default.ttf's line pitch at 640 × 480
 constexpr float matrix_pi = 3.14159265358979323846f;
@@ -203,11 +204,60 @@ bool View::init() {
     pvr_poly_compile(&overlay_header_, &context);
     context.blend.dst = PVR_BLEND_ONE;
     pvr_poly_compile(&glow_header_, &context);
-    return file_bytes("/rd/theme/font.map", widths_[0].data(), widths_[0].size()) &&
-           file_bytes("/rd/theme/title-font.map", widths_[1].data(), widths_[1].size()) &&
-           load_mesh("/rd/theme/notes.mesh", regular_note_) &&
-           load_mesh("/rd/theme/hopo.mesh", tap_marker_) &&
-           load_mesh("/rd/theme/keys.mesh", fret_key_);
+    return file_bytes("/rd/theme/font.map", widths_.data(), widths_.size()) &&
+           file_bytes("/rd/theme/title-font.map", digit_widths_.data(), digit_widths_.size()) &&
+           prepare_note_mesh("/rd/theme/notes.mesh", regular_note_) &&
+           prepare_note_mesh("/rd/theme/hopo.mesh", tap_marker_) &&
+           prepare_frets();
+}
+
+bool View::prepare_frets() {
+    Mesh shape;
+    if (!load_mesh("/rd/theme/keys.mesh", shape)) {
+        return false;
+    }
+    const auto count = std::accumulate(shape.begin(), shape.end(), size_t{},
+        [](size_t sum, const Face &face) { return sum + face.count; });
+    for (unsigned lane = 0; lane < frets_.size(); ++lane) {
+        for (unsigned held = 0; held < frets_[lane].size(); ++held) {
+            auto &vertices = frets_[lane][held];
+            vertices.reserve(count);
+            const float depressed = held * 0.5f;
+            const auto color = shade(fret_colors[lane], 0.86f, 0.08f + depressed);
+            for (const auto &face : shape) {
+                for (unsigned i = 0; i < face.count; ++i) {
+                    vertices.push_back(mesh_vertex(face.vertices[i], lane_x(lane), depressed / 6, 0,
+                                                   color, i + 1 == face.count));
+                }
+            }
+        }
+    }
+    return true;
+}
+
+bool View::prepare_note_mesh(const char *name, NoteMesh &mesh) {
+    Mesh shape;
+    if (!load_mesh(name, shape)) {
+        return false;
+    }
+    for (const auto &face : shape) {
+        for (unsigned i = 0; i < face.count; ++i) {
+            const auto &vertex = face.vertices[i];
+            const std::array<float, 3> position{vertex.x, vertex.y, vertex.z};
+            const auto point = std::find(mesh.points.begin(), mesh.points.end(), position);
+            NoteCorner corner{size_t(point - mesh.points.begin()),
+                              i + 1 == face.count ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX, {}};
+            if (point == mesh.points.end()) {
+                mesh.points.push_back(position);
+            }
+            for (unsigned lane = 0; lane < corner.colors.size(); ++lane) {
+                corner.colors[lane] = shade(shade(fret_colors[lane], 0.8f, 0.1f), vertex.shade);
+            }
+            mesh.corners.push_back(corner);
+        }
+    }
+    mesh.projected.resize(mesh.points.size());
+    return true;
 }
 
 void View::reset_effects() {
@@ -219,6 +269,7 @@ void View::reset_effects() {
     stage_beat_ = 0;
     last_stage_beat_ms_ = -1;
     last_multiplier_ms_ = -1;
+    guitar_time_origin_ms_ = timer_ms_gettime64();
 }
 
 void View::record_pick(const Round &round) {
@@ -247,10 +298,17 @@ void View::record_pick(const Round &round) {
     }
 }
 
+void View::material(const pvr_poly_hdr_t &header) {
+    if (active_header_ != &header) {
+        pvr_prim(&header, sizeof(header));
+        active_header_ = &header;
+    }
+}
+
 void View::sprite(TextureId id, float x, float y, float w, float h, float z,
                   float u0, float v0, float u1, float v1, uint32_t color) {
     const auto &texture = textures_[id];
-    pvr_prim(&texture.header, sizeof(texture.header));
+    material(texture.header);
     const pvr_vertex_t vertices[] = {
         {PVR_CMD_VERTEX, x,     y,     z, u0, v0, color, 0},
         {PVR_CMD_VERTEX, x + w, y,     z, u1, v0, color, 0},
@@ -263,9 +321,8 @@ void View::sprite(TextureId id, float x, float y, float w, float h, float z,
 void View::rotated_sprite(TextureId id, float x, float y, float w, float h, float angle,
                           float depth, uint32_t color) {
     const auto &texture = textures_[id];
-    pvr_prim(&texture.header, sizeof(texture.header));
-    const float cos_a = std::cos(angle);
-    const float sin_a = std::sin(angle);
+    material(texture.header);
+    const auto rotation = shz_sincosf(angle);
     pvr_vertex_t quad[4];
     for (unsigned i = 0; i < 4; ++i) {
         const float u = (i & 1) ? 1.0f : 0.0f;
@@ -273,7 +330,7 @@ void View::rotated_sprite(TextureId id, float x, float y, float w, float h, floa
         const float dx = (u - 0.5f) * w;
         const float dy = (v - 0.5f) * h;
         quad[i] = {i == 3 ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX,
-                   x + dx * cos_a - dy * sin_a, y + dx * sin_a + dy * cos_a,
+                   x + dx * rotation.cos - dy * rotation.sin, y + dx * rotation.sin + dy * rotation.cos,
                    depth, u, v, color, 0};
     }
     pvr_prim(quad, sizeof(quad));
@@ -283,7 +340,7 @@ void View::rotated_sprite(TextureId id, float x, float y, float w, float h, floa
 void View::board_quad(TextureId id, float x0, float x1, float y, float z0, float z1,
                       float u0, float v0, float u1, float v1, uint32_t back, uint32_t front) {
     const auto &texture = textures_[id];
-    pvr_prim(&texture.header, sizeof(texture.header));
+    material(texture.header);
     const pvr_vertex_t vertices[] = {
         project(x0, y, z1, u0, v0, back, false),
         project(x1, y, z1, u1, v0, back, false),
@@ -294,25 +351,23 @@ void View::board_quad(TextureId id, float x0, float x1, float y, float z0, float
 }
 
 void View::text(float x, float y, const char *line, float size, uint32_t color, bool centered,
-                bool title, float depth_offset) {
-    const auto &mapping = widths_[title ? 1 : 0];
+                float depth_offset) {
     const auto get_index = [](unsigned char c) { return c >= 32 && c < 127 ? c - 32 : '?' - 32; };
     if (centered) {
         for (auto *character = line; *character; ++character) {
-            x -= 0.5f * size * mapping[get_index(*character)];
+            x -= 0.5f * size * widths_[get_index(*character)];
         }
     }
 
     const float depth = menu_depth + 1 + depth_offset;
-    text_line(x + 1.9f, y + 1.9f, line, size, color & 0xff000000, title, depth);
-    text_line(x, y, line, size, color, title, depth);
+    text_line(x + 1.9f, y + 1.9f, line, size, color & 0xff000000, depth);
+    text_line(x, y, line, size, color, depth);
 }
 
-void View::text_line(float x, float y, const char *line, float size, uint32_t color, bool title, float depth) {
-    const auto &mapping = widths_[title ? 1 : 0];
+void View::text_line(float x, float y, const char *line, float size, uint32_t color, float depth) {
     const auto get_index = [](unsigned char c) { return c >= 32 && c < 127 ? c - 32 : '?' - 32; };
-    const auto &header = textures_[title ? title_font : font].header;
-    pvr_prim(&header, sizeof(header));
+    const auto &header = textures_[font].header;
+    material(header);
     x -= 2.0f * size;  // left padding inside each atlas cell
     for (; *line; ++line) {
         const auto index = get_index(*line);
@@ -329,54 +384,113 @@ void View::text_line(float x, float y, const char *line, float size, uint32_t co
             };
             pvr_prim(glyph, sizeof(glyph));
         }
-        x += size * mapping[index];
+        x += size * widths_[index];
     }
 }
 
-void View::mesh(const Mesh &shape, float x, float y, float z, uint32_t color) {
-    pvr_prim(&mesh_header_, sizeof(mesh_header_));
-    for (const auto &face : shape) {
-        pvr_vertex_t strip[4];
-        for (unsigned i = 0; i < face.count; ++i) {
-            const auto &point = face.vertices[i];
-            strip[i] = project(x + point.x, y + point.y, z + point.z, 0, 0,
-                               shade(color, point.shade), i + 1 == face.count);
+void View::title_number(float y, const char *digits, float size, uint32_t color) {
+    if (y >= 480.0f) {
+        return;
+    }
+    float left = 320.0f;
+    for (const char *digit = digits; *digit; ++digit) {
+        left -= 0.5f * size * digit_widths_[*digit - '0'];
+    }
+    const auto line = [&](float x, float top, uint32_t ink) {
+        for (const char *digit = digits; *digit; ++digit) {
+            const unsigned index = *digit - '0';
+            const float width = digit_widths_[index];
+            const float u = (index * 48 + 2) / 512.0f;
+            sprite(title_font, x, top, width * size, 128.0f * size, menu_depth + 1,
+                   u, 0, u + width / 512.0f, 1, ink);
+            x += width * size;
         }
-        pvr_prim(strip, face.count * sizeof(pvr_vertex_t));
-    }
+    };
+    line(left + 1.92f, y + 1.92f, color & 0xff000000);
+    line(left, y, color);
 }
 
-void View::draw_tail_wave(unsigned lane, float end, int time) {
+pvr_vertex_t View::mesh_vertex(const MeshVertex &point, float x, float y, float z,
+                               uint32_t color, bool last) {
+    return project(x + point.x, y + point.y, z + point.z, 0, 0, shade(color, point.shade), last);
+}
+
+void View::note_mesh(NoteMesh &mesh, unsigned lane, float z) {
+    material(mesh_header_);
     const float x = lane_x(lane);
-    const auto color = fret_colors[lane];
-    pvr_prim(&glow_header_, sizeof(glow_header_));
-    constexpr unsigned samples = 28;
-    pvr_vertex_t edge[2][2];
-    for (unsigned i = 0; i <= samples; ++i) {
-        const float ratio = float(i) / samples;
-        const float z = ratio * end;
-        const float phase = time * 0.014f + z * 5.0f + lane;
-        const float width = (0.095f + 0.083f * std::sin(phase) + 0.052f * std::cos(phase * 0.43f)) *
-                            std::min(1.0f, (1.0f - ratio) * 5.0f);
-        const auto inner = project(x, 0.018f, z, 0, 0, 0xbfffffff, false);
-        const pvr_vertex_t outer[] = {
-            project(x + width, 0.018f, z, 0, 0, tint(color, 0.5f), false),
-            project(x - width, 0.018f, z, 0, 0, tint(color, 0.5f), false),
-        };
-        for (unsigned side = 0; side < 2; ++side) {
-            if (i) {
-                pvr_vertex_t quad[] = {edge[side][0], edge[side][1], outer[side], inner};
-                quad[3].flags = PVR_CMD_VERTEX_EOL;
-                pvr_prim(quad, sizeof(quad));
-            }
-            edge[side][0] = outer[side];
-            edge[side][1] = inner;
+    for (size_t i = 0; i < mesh.points.size(); ++i) {
+        const auto &point = mesh.points[i];
+        mesh.projected[i] = project(x + point[0], point[1], z + point[2], 0, 0, 0, false);
+    }
+    // Reuse the projected position across faces and preserve per-corner color and strip boundaries.
+    for (const auto &corner : mesh.corners) {
+        auto *vertex = pvr_dr_target(direct_);
+        auto projected = mesh.projected[corner.point];
+        projected.flags = corner.flags;
+        projected.argb = corner.colors[lane];
+        *vertex = projected;
+        pvr_dr_commit(vertex);
+    }
+}
+
+void View::draw_tail_wave(unsigned lane, const Chord &note, int position_ms, float period_ms,
+                          float guitar_time_ms) {
+    // Keep the local step smaller than a millisecond representable, even late in a song.
+    const float start = (note.time_ms - position_ms) + 0.001f * note.start_us_remainder;
+    const float remaining = (note.ends[lane] - position_ms) + 0.001f * note.end_us_remainders[lane];
+    if (remaining < 0.001f) {
+        return;
+    }
+
+    // Guitar.renderNotes samples from the tip toward the hit line.
+    const float projection = board_length / (5.0f * period_ms);
+    const float first_step = remaining * projection * 25.0f;
+    const float step_gradient = (10.0f - first_step) / remaining;
+    const float x = lane_x(lane);
+    const auto color = tint(fret_colors[lane], 0.5f);
+    const auto slice = [&](float time, float width) {
+        const float z = time * projection;
+        const auto center = project(x, 0.0f, z, 0, 0, 0xbfffffff, false);
+        const float span = focus * width * center.z;
+        auto first_edge = center;
+        auto second_edge = center;
+        first_edge.x += span;
+        second_edge.x -= span;
+        first_edge.argb = second_edge.argb = color;
+        return std::array<pvr_vertex_t, 3>{first_edge, center, second_edge};
+    };
+
+    float time = remaining;
+    float step = first_step;
+    if (time - step <= 0.0f) {
+        return;
+    }
+    material(glow_header_);
+    auto previous = slice(time, 0.0f);
+    const float sin_phase = lane - guitar_time_ms * 0.01f + position_ms * 0.03f;
+    const float cos_phase = lane + guitar_time_ms * 0.01f + position_ms * 0.02f;
+    for (unsigned segment = 0; segment < 512 && time > start; ++segment) {
+        const float next_time = time - step;
+        if (next_time <= 0.0f || next_time >= time) {
+            break;
         }
+        time = next_time;
+        const float offset = ((time - start) * -0.1f - start) / 64.0f + 0.0001f;
+        const float sinc = std::abs(offset) < 0.125f ? 1.0f - offset * offset / 6.0f
+                                                     : shz_sinf(offset) / offset;
+        const float width = 0.1f * (shz_sinf(sin_phase + time * 0.03f) +
+                                    shz_cosf(cos_phase + time * 0.02f)) + 0.1f + 0.2f * sinc;
+        auto next = slice(time, width);
+        pvr_vertex_t strip[] = {previous[0], next[0], previous[1], next[1], previous[2], next[2]};
+        strip[5].flags = PVR_CMD_VERTEX_EOL;
+        pvr_prim(strip, sizeof(strip));
+        previous = next;
+        step = first_step + step_gradient * (remaining - time);
     }
 }
 
 void View::world(const Frame &f, const SongChart &song, const Round &round, const Chart &chart,
-                 float period_ms) {
+                 float period_ms, const NoteMeshRange &meshes) {
     const float scroll = std::fmod(-0.5f * board_z(f.time_ms, period_ms), 1.0f);
     const auto surface = [&](float start, float end, uint32_t back, uint32_t front) {
         board_quad(neck, left_edge, right_edge, 0.0f, start, end,
@@ -409,7 +523,6 @@ void View::world(const Frame &f, const SongChart &song, const Round &round, cons
 
     const auto past = std::lower_bound(chart.begin(), chart.end(), f.time_ms - int(period_ms * 2),
                                        [](const Chord &c, int time) { return c.time_ms < time; });
-    unsigned precise = 0;
     for (size_t index = past - chart.begin(); index < chart.size(); ++index) {
         const auto &chord = chart[index];
         const float z = board_z(chord.time_ms - f.time_ms, period_ms);
@@ -435,12 +548,9 @@ void View::world(const Frame &f, const SongChart &song, const Round &round, cons
                                0, 0, 1, 1, tail_color, tail_color);
                 }
             }
-            if (taken || z < -1.0f) {
+            // Guitar.renderNotes clips a played head only after it crosses the hit line.
+            if (z < -1.0f || (taken && z < 0.0f) || meshes.contains(index, lane)) {
                 continue;
-            }
-            const bool mesh_note = z >= 0.0f && z <= 9.6f && precise++ < 14;
-            if (mesh_note) {
-                continue;  // The opaque geometry was submitted before the translucent board layers.
             }
             const auto p = project(x, 0.0f, z, 0, 0, white, false);
             // The baked sprite covers a 128-pixel crop in note_preview's 896-pixel focal length.
@@ -452,12 +562,14 @@ void View::world(const Frame &f, const SongChart &song, const Round &round, cons
         }
     }
 
-    const auto held_end = std::min(board_length, board_z(round.sustained_until() - f.time_ms, period_ms));
+    const auto *held = round.sustaining_chord(chart);
     const auto recent = f.time_ms - round.last_hit_ms;
+    const float guitar_time_ms = held ? timer_ms_gettime64() - guitar_time_origin_ms_ : 0.0f;
     for (unsigned lane = 0; lane < 5; ++lane) {
-        const bool sustained = (round.sustain_frets & (1u << lane)) && held_end > 0;
+        const bool sustained = held && (held->frets & (1u << lane)) &&
+                               held->ends[lane] >= f.time_ms;
         if (sustained) {
-            draw_tail_wave(lane, held_end, f.time_ms);
+            draw_tail_wave(lane, *held, f.time_ms, period_ms, guitar_time_ms);
         }
         if (sustained || ((round.last_hit_frets & (1u << lane)) && recent < 170)) {
             const auto p = project(lane_x(lane), 0.10f, 0.0f, 0, 0, white, false, 0.01f);
@@ -506,10 +618,10 @@ void View::stage_decoration(int time_ms) {
     layer(stage_speakers, 0.7f, 0.0f, 213 * speaker_scale, 179 * speaker_scale);
     layer(stage_cones, 0.67f, -0.03f, 118 * beat_scale(0.07f), 125 * beat_scale(0.07f));
     const float right_phase = pulse(0.25f);
-    layer(stage_crowd_left, -0.8f + 0.04f * beat_phase * std::sin(matrix_pi * beat_phase),
-          0.4f + 0.08f * beat_phase * std::cos(matrix_pi * beat_phase), 278, 248);
-    layer(stage_crowd_right, 0.8f + 0.02f * right_phase * std::sin(2 * matrix_pi * right_phase),
-          0.4f + 0.06f * right_phase * std::cos(2 * matrix_pi * right_phase), 172, 223);
+    layer(stage_crowd_left, -0.8f + 0.04f * beat_phase * shz_sinf(matrix_pi * beat_phase),
+          0.4f + 0.08f * beat_phase * shz_cosf(matrix_pi * beat_phase), 278, 248);
+    layer(stage_crowd_right, 0.8f + 0.02f * right_phase * shz_sinf(2 * matrix_pi * right_phase),
+          0.4f + 0.06f * right_phase * shz_cosf(2 * matrix_pi * right_phase), 172, 223);
 }
 
 void View::stage_lights(const Frame &frame, const Round &round) {
@@ -529,7 +641,7 @@ void View::stage_lights(const Frame &frame, const Round &round) {
         }
         const auto color = tint(shade(lane_color(beat_lanes_[channel]), 0.50f + 0.35f * recent), 0.7f);
         const float phase = std::clamp(miss / miss_period[i], 0.0f, 1.0f);
-        const float impulse = i == 5 ? 1.0f - phase : 1.0f - std::cos(matrix_pi * (1.0f - phase));
+        const float impulse = i == 5 ? 1.0f - phase : 1.0f - shz_cosf(matrix_pi * (1.0f - phase));
         rotated_sprite(stage_beam, 320 + 320 * light_x[i], 240 + 240 * light_y[i],
                        294 * 3, 263 * 3, (light_angle[i] + miss_angle[i] * impulse) * matrix_pi / 180,
                        0.95f, color);
@@ -549,7 +661,7 @@ void View::multiplier_effect(const Frame &frame, const Round &round, float song_
     const float pulse = 1.0f - std::abs(1.0f - ratio);
     const float alpha = pulse * pulse - 0.5f;
     if (alpha > 0.0f) {
-        pvr_prim(&overlay_header_, sizeof(overlay_header_));
+        material(overlay_header_);
         const auto top = tint(color, alpha);
         // The original flash ends at normalized y=1.0, below the 480px viewport.
         const auto bottom = tint(color, alpha * 0.4375f);
@@ -601,16 +713,25 @@ void View::draw_stats(const Frame &frame, const Round &round, const Rules &rules
 }
 
 void View::menu_backdrop(const Frame &frame) {
+    if (frame.screen == Screen::results) {
+        const float hidden = 1.0f - std::min(1.0f, frame.results_age_ms / 512.0f);
+        // GameResultsScene and SceneClient both increment the background clock.
+        const float t = frame.results_age_ms / 2500.0f;
+        const float zoom = shz_sinf(t / 8.0f) + 2.0f;
+        rotated_sprite(keyboard, 320 + 160 * shz_cosf(t / 2) + 1280 * hidden * hidden,
+                       240 - 120 * shz_sinf(t), 958 * zoom, 272 * zoom, t, 0.01f);
+        return;
+    }
     const float phase = (timer_ms_gettime64() % 251327) / 5000.0f;
-    const float zoom = std::sin(phase / 8) + 2;
+    const float zoom = shz_sinf(phase / 8) + 2;
     if (frame.screen == Screen::setlist) {
-        rotated_sprite(cassette_bg, 320 + 160 * std::sin(phase / 2), 240 - 120 * std::cos(phase),
+        rotated_sprite(cassette_bg, 320 + 160 * shz_sinf(phase / 2), 240 - 120 * shz_cosf(phase),
                        350 * zoom, 223 * zoom, phase, 0.01f);
     } else if (frame.screen == Screen::difficulty) {
-        rotated_sprite(editor_bg, 320 + 160 * std::sin(phase / 2), 240 - 120 * std::cos(phase),
+        rotated_sprite(editor_bg, 320 + 160 * shz_sinf(phase / 2), 240 - 120 * shz_cosf(phase),
                        1457 * zoom, 402 * zoom, phase, 0.01f);
     } else {
-        rotated_sprite(keyboard, 320 + 160 * std::cos(phase / 2), 240 - 120 * std::sin(phase),
+        rotated_sprite(keyboard, 320 + 160 * shz_cosf(phase / 2), 240 - 120 * shz_sinf(phase),
                        958 * zoom, 272 * zoom, phase, 0.01f);
     }
 }
@@ -656,7 +777,7 @@ void View::setlist(const Frame &frame, const std::vector<SongEntry> &library) {
             const auto word = label.substr(from, next - from);
             float word_width = 0;
             for (const unsigned char ch : word) {
-                word_width += widths_[0][ch >= 32 && ch < 127 ? ch - 32 : '?' - 32] * scale;
+                word_width += widths_[ch >= 32 && ch < 127 ? ch - 32 : '?' - 32] * scale;
             }
             constexpr float gap = 6.0f;
             if (!line.empty() && width + gap + word_width > 217) {
@@ -702,7 +823,7 @@ void View::menu(const Frame &frame, const Round &round,
     };
     const auto center = [&](float y, const char *label) { text(320, y, label, main_font, yellow, true); };
     const auto dim = [&](float visibility) {
-        pvr_prim(&overlay_header_, sizeof(overlay_header_));
+        material(overlay_header_);
         const auto top = tint(0, 0.3f * visibility);
         const auto bottom = tint(0, 0.9f * visibility);
         constexpr float depth = menu_depth + 1.5f;
@@ -725,17 +846,17 @@ void View::menu(const Frame &frame, const Round &round,
             if (frame.countdown < 6.0f) {
                 const int beat = static_cast<int>(frame.countdown);
                 const float beat_fraction = frame.countdown - beat;
-                const float scale = big_font * (1.0f + 0.25f * beat_fraction * beat_fraction * beat_fraction);
+                const float scale = 1.28f * (1.0f + 0.25f * beat_fraction * beat_fraction * beat_fraction);
                 std::snprintf(line, sizeof(line), "%d", beat);
-                text(320, 288 - 18 * scale, line, scale, gold, true, true);
+                title_number(288 - 0.5f * title_font_height * scale, line, scale, gold);
             }
         }
     }
     switch (frame.screen) {
         case Screen::menu: {
             const float phase = (timer_ms_gettime64() % 251327) / 5000.0f;
-            rotated_sprite(logo, 320, 96, 572 * (1 + 0.025f * std::sin(phase * 16)),
-                           138 * (1 - 0.025f * std::cos(phase * 17)), 0, menu_depth);
+            rotated_sprite(logo, 320, 96, 572 * (1 + 0.025f * shz_sinf(phase * 16)),
+                           138 * (1 - 0.025f * shz_cosf(phase * 17)), 0, menu_depth);
             rotated_sprite(menu_pose, 480, 312, 302 * 0.9f, 413 * 0.9f, 0, menu_depth);
             constexpr const char *options[] = {"Play Game", "Tutorial", "Song Editor >", "Settings >", "Credits", "Quit"};
             for (unsigned i = 0; i < 6; ++i) {
@@ -779,28 +900,52 @@ void View::menu(const Frame &frame, const Round &round,
                 const bool selected = frame.selected == i;
                 const auto color = tint(selected ? gold : yellow, 1.0f - transition * (selected ? 2 : 1));
                 text(128 - 160 * transition, menu_y + i * menu_line, options[i], main_font,
-                     color, false, false, 1.0f);
+                     color, false, 1.0f);
                 transition *= 2.0f;
             }
             break;
         }
         case Screen::results: {
-            center(24, "Song Finished!");
-            std::snprintf(line, sizeof(line), "%u", round.score);
-            text(320, 51, line, big_font * 1.1f, gold, true, true);
-            const auto rating = round.rating(frame.gems);
-            for (unsigned i = 0; i < 5; ++i) {
-                sprite(i < rating ? star : star_off, 132 + i * 76, 203, 70, 68, menu_depth,
-                       0, 0, 1, 1, yellow);
+            const unsigned age = frame.results_age_ms;
+            const float hidden = 1.0f - std::min(1.0f, age / 512.0f);
+            const float slide = hidden * hidden;
+            const auto color = tint(yellow, 1.0f - slide);
+            const auto anim = [age](unsigned start, unsigned end) {
+                return std::min(1.0f, static_cast<float>(std::max(age, start)) / end);
+            };
+            text(320, (0.05f - slide) * 640, "Song Finished!", main_font, color, true);
+            const float rise = anim(0, 1000);
+            const auto score = age >= 2000 ? round.score : static_cast<unsigned>(round.score * double(anim(1000, 2000)));
+            std::snprintf(line, sizeof(line), "%u", score);
+            title_number((1.11f + slide - rise * rise * rise) * 640, line, 1.6f, color);
+            if (age > 1000) {
+                constexpr float star_width = 0.75f * title_font_height * 0.0017f * 640;
+                const auto rating = round.rating(frame.gems);
+                const float y = (0.35f + slide) * 640;
+                for (unsigned i = 0; i < 5; ++i) {
+                    const float travel = 1.0f - anim(1000 + i * 200, 1200 + i * 200);
+                    const float x = 320 + star_width * (float(i) - 2.5f) + 64000 * travel * travel;
+                    if (x < 640) {
+                        const auto id = i < rating ? star : star_off;
+                        const float height = star_width * 109.0f / (id == star ? 113.0f : 114.0f);
+                        // Font._renderString reverses v for custom glyphs.
+                        sprite(id, x + 1.92f, y + 1.92f, star_width, height, menu_depth,
+                               0, 1, 1, 0, color & 0xff000000);
+                        sprite(id, x, y, star_width, height, menu_depth, 0, 1, 1, 0, color);
+                    }
+                }
             }
-            const auto accuracy = frame.gems ? (round.gem_hits * 100 / frame.gems) : 0;
-            std::snprintf(line, sizeof(line), "Accuracy: %u%%", accuracy);
-            center(275, line);
-            std::snprintf(line, sizeof(line), "Longest note streak: %u", round.best_streak);
-            center(310, line);
-            item(128, 350, "Replay", 0);
-            item(128, 382, "Change Song", 1);
-            item(128, 414, "Quit to Main Menu", 2);
+            if (frame.results_actions) {
+                item(128, 320, "Replay", 0);
+                item(128, 365, "Change Song", 1);
+                item(128, 410, "Quit to Main Menu", 2);
+            } else if (age > 2500) {
+                const auto accuracy = frame.gems ? round.gem_hits * 100 / frame.gems : 0;
+                std::snprintf(line, sizeof(line), "Accuracy: %u%%", accuracy);
+                text(320, 352, line, main_font, color, true);
+                std::snprintf(line, sizeof(line), "Longest note streak: %u", round.best_streak);
+                text(320, 396.8f, line, main_font, color, true);
+            }
             break;
         }
         case Screen::failed:
@@ -836,46 +981,51 @@ void View::draw(const Frame &frame, const SongChart &song, const Round &round,
     const float period = song.us_per_beat(frame.time_ms) * 0.001f;
     const float period_ms = period * 100.0f / frame.board_speed;
     const auto &chart = song.guitar[frame.difficulty];
+    NoteMeshRange meshes;
 
     pvr_wait_ready();
     pvr_scene_begin();
     pvr_list_begin(PVR_LIST_OP_POLY);
+    active_header_ = nullptr;
+    pvr_dr_init(&direct_);
     if (playing) {
         sprite(stage, 0, 0, 640, 480, 0.01f);
+        const auto first_note = std::lower_bound(chart.begin(), chart.end(), frame.time_ms,
+            [](const Chord &chord, int time) { return chord.time_ms < time; });
+        meshes.first = meshes.last = first_note - chart.begin();
         unsigned precise = 0;
-        for (size_t i = round.next; i < chart.size() && precise < 14; ++i) {
+        for (size_t i = meshes.first; i < chart.size() && precise < 14; ++i) {
             const auto &chord = chart[i];
             const float z = board_z(chord.time_ms - frame.time_ms, period_ms);
             if (z > 9.6f) {
                 break;
             }
-            if (z < 0.0f || round.was_hit(i)) {
-                continue;
-            }
             for (unsigned lane = 0; lane < 5 && precise < 14; ++lane) {
                 if (chord.frets & (1u << lane)) {
-                    const auto color = shade(fret_colors[lane], 0.8f, 0.1f);
-                    mesh(regular_note_, lane_x(lane), 0, z, color);
+                    note_mesh(regular_note_, lane, z);
                     if (chord.hopo) {
-                        mesh(tap_marker_, lane_x(lane), 0, z, color);
+                        note_mesh(tap_marker_, lane, z);
                     }
+                    meshes.last = i;
+                    meshes.last_lane_end = lane + 1;
                     ++precise;
                 }
             }
         }
-        for (unsigned lane = 0; lane < 5; ++lane) {
-            const float depressed = frame.held & (1u << lane) ? 0.5f : 0.0f;
-            const auto color = shade(fret_colors[lane], 0.86f, 0.08f + depressed);
-            mesh(fret_key_, lane_x(lane), depressed / 6, 0, color);
+        material(mesh_header_);
+        for (unsigned lane = 0; lane < frets_.size(); ++lane) {
+            const auto &vertices = frets_[lane][(frame.held >> lane) & 1u];
+            pvr_prim(vertices.data(), vertices.size() * sizeof(pvr_vertex_t));
         }
     }
     pvr_list_finish();
 
     pvr_list_begin(PVR_LIST_TR_POLY);
+    active_header_ = nullptr;
     if (playing) {
         update_stage(frame.time_ms, period);
         stage_decoration(frame.time_ms);
-        world(frame, song, round, chart, period_ms);
+        world(frame, song, round, chart, period_ms, meshes);
         stage_lights(frame, round);
         draw_stats(frame, round, Rules{60000000.0f / song.initial_us_per_beat});
         multiplier_effect(frame, round, song.initial_us_per_beat * 0.001f);

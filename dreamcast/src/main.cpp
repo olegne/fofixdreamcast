@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <malloc.h>
 #include <string>
 #include <vector>
@@ -21,8 +22,9 @@
 #include <dc/pvr.h>
 #include <dc/sound/sfxmgr.h>
 #include <dc/sound/sound.h>
-#include <dc/vblank.h>
 #include <kos/init.h>
+
+extern "C" int __real_maple_queue_frame(maple_frame_t *frame);
 
 extern "C" {
 volatile uint8_t dc_gameplay_active = 0;
@@ -33,6 +35,10 @@ volatile uint32_t dc_overstrums = 0;
 volatile uint32_t dc_score = 0;
 volatile int32_t dc_event_time_ms = 0;
 volatile int32_t dc_last_hit_chart_ms = -1;
+#ifdef FRETSONFIRE_INPUT_TRACE
+volatile uint32_t dc_input_trace_count = 0;
+volatile uint32_t dc_input_trace[128][8]{};
+#endif
 }
 
 namespace {
@@ -47,9 +53,29 @@ void record_round(const dc::Round &round, int time_ms) {
     dc_last_hit_chart_ms = round.hits ? round.last_hit_ms - round.last_hit_offset_ms : -1;
 }
 
+enum class InputTrace : uint32_t { report = 1, fret, strum, advance, hit };
+
+#ifdef FRETSONFIRE_INPUT_TRACE
+void trace_input(InputTrace kind, int time_ms, unsigned detail, uint8_t frets, const dc::Round &round) {
+    const auto index = dc_input_trace_count;
+    auto &entry = dc_input_trace[index % 128];
+    entry[0] = static_cast<uint32_t>(kind);
+    entry[1] = static_cast<uint32_t>(time_ms);
+    entry[2] = detail;
+    entry[3] = frets;
+    entry[4] = round.hits;
+    entry[5] = round.misses;
+    entry[6] = round.overstrums;
+    entry[7] = round.score;
+    dc_input_trace_count = index + 1;
+}
+#else
+inline void trace_input(InputTrace, int, unsigned, uint8_t, const dc::Round &) {}
+#endif
+
 enum Effect : unsigned {
     accept, back, select1, select2, select3, start_song, miss1, miss2, miss3, miss4, miss5, miss6,
-    no_points, taunt1, taunt2, taunt3, taunt4, myhero, perfect1, perfect2, perfect3, effect_count
+    effect_count
 };
 
 class SoundEffects {
@@ -73,8 +99,6 @@ public:
         constexpr const char *names[] = {
             "in", "out", "crunch1", "crunch2", "crunch3", "start",
             "fiba1", "fiba2", "fiba3", "fiba4", "fiba5", "fiba6",
-            "jurgen1", "jurgen2", "jurgen3", "jurgen4", "jurgen5",
-            "myhero", "perfect1", "perfect2", "perfect3"
         };
         static_assert(sizeof(names) / sizeof(names[0]) == effect_count);
         for (unsigned i = 0; i < effect_count; ++i) {
@@ -161,6 +185,7 @@ void tutorial_cue(dc::Frame &frame, const std::vector<Cue> &cues) {
 }
 
 static dc::Audio audio;
+static dc::ResultAudio result_audio;
 
 enum InputButton : unsigned {
     nav_up = 1u << 0, nav_down = 1u << 1, nav_left = 1u << 2, nav_right = 1u << 3,
@@ -233,25 +258,33 @@ Input read_input() {
 
 struct KeyboardReport {
     Input state;
-    uint32_t timestamp;
+    uint64_t timestamp_us;
     unsigned pressed;
     uint8_t pressed_frets;
+    uint8_t released_frets;
 };
 
 class KeyboardReports {
 public:
-    static void key_event(maple_device_t *dev, kbd_key_t, key_state_t, kbd_mods_t, kbd_leds_t, void *data) {
-        static_cast<KeyboardReports *>(data)->capture(dev);
+    void start() {
+        observer_ = this;
     }
 
-    static void vblank(uint32_t, void *data) {
-        static_cast<KeyboardReports *>(data)->capture(maple_enum_type(0, MAPLE_FUNC_KEYBOARD));
-    }
-
-    void capture(maple_device_t *dev) {
-        if (dev != maple_enum_type(0, MAPLE_FUNC_KEYBOARD)) {
-            return;
+    static void observe_poll(maple_frame_t *frame) {
+        // The KOS keyboard event callback omits modifiers. Observe the same
+        // GETCOND completion that updates all keys, including right Shift.
+        if (observer_ && frame->cmd == MAPLE_COMMAND_GETCOND &&
+            frame->length == 1 && frame->callback && frame->callback != reply && frame->send_buf &&
+            *static_cast<const uint32_t *>(frame->send_buf) == MAPLE_FUNC_KEYBOARD) {
+            const auto *keyboard = maple_enum_type(0, MAPLE_FUNC_KEYBOARD);
+            if (keyboard && &keyboard->frame == frame) {
+                observer_->original_reply_ = frame->callback;
+                frame->callback = reply;
+            }
         }
+    }
+
+    void capture(maple_device_t *dev, uint64_t timestamp_us) {
         const auto *keys = kbd_get_state(dev);
         if (!keys) {
             return;
@@ -262,12 +295,13 @@ public:
         }
         const auto pressed = state.buttons & ~previous_.buttons;
         const auto pressed_frets = uint8_t(state.frets & ~previous_.frets);
+        const auto released_frets = uint8_t(previous_.frets & ~state.frets);
         previous_ = state;
         if (written_ - read_ == reports_.size()) {
             ++read_;
             ++overflow;
         }
-        reports_[written_++ % reports_.size()] = {state, uint32_t(timer_ms_gettime64()), pressed, pressed_frets};
+        reports_[written_++ % reports_.size()] = {state, timestamp_us, pressed, pressed_frets, released_frets};
     }
 
     void reset(const Input &state) {
@@ -277,9 +311,9 @@ public:
         irq_restore(irq);
     }
 
-    bool pop(KeyboardReport &report) {
+    bool pop(KeyboardReport &report, uint64_t through_us = std::numeric_limits<uint64_t>::max()) {
         const auto irq = irq_disable();
-        const bool available = read_ != written_;
+        const bool available = read_ != written_ && reports_[read_ % reports_.size()].timestamp_us <= through_us;
         if (available) {
             report = reports_[read_++ % reports_.size()];
         }
@@ -290,11 +324,22 @@ public:
     unsigned overflow = 0;
 
 private:
+    static void reply(maple_state_t *state, maple_frame_t *frame) {
+        const auto timestamp_us = timer_us_gettime64();
+        frame->callback = observer_->original_reply_;
+        frame->callback(state, frame);
+        observer_->capture(frame->dev, timestamp_us);
+    }
+
+    static KeyboardReports *observer_;
+    decltype(maple_frame_t::callback) original_reply_ = nullptr;
     Input previous_{dc::InputDevice::keyboard};
     std::array<KeyboardReport, 32> reports_{};
     unsigned read_ = 0;
     unsigned written_ = 0;
 };
+
+KeyboardReports *KeyboardReports::observer_ = nullptr;
 
 unsigned move_list(unsigned current, unsigned count, int direction) {
     return (current + count + direction) % count;
@@ -322,6 +367,11 @@ struct FrameTiming {
 
 } // namespace
 
+extern "C" int __wrap_maple_queue_frame(maple_frame_t *frame) {
+    KeyboardReports::observe_poll(frame);
+    return __real_maple_queue_frame(frame);
+}
+
 int main() {
     dc::View view;
     if (!view.init()) {
@@ -332,9 +382,8 @@ int main() {
     SoundEffects sounds;
     sounds.load();
     KeyboardReports keyboard_reports;
-    kbd_set_event_handler(KeyboardReports::key_event, &keyboard_reports);
-    const auto vblank_handle = vblank_handler_add(KeyboardReports::vblank, &keyboard_reports);
-    std::printf("FoFDC: Maple report sampling vblank=%d\n", vblank_handle >= 0);
+    keyboard_reports.start();
+    std::printf("FoFDC: Maple report sampling at GETCOND completion\n");
     const auto tutorial = read_tutorial_cues();
     const auto songs = dc::song_library();
     dc::SongChart song;
@@ -347,6 +396,7 @@ int main() {
     unsigned last_regular_song = 1;
     unsigned previous_buttons = 0;
     Input processed_input;
+    uint8_t blocked_frets = 0;
     int processed_time = 0;
     int chart_delay_ms = 0;
     uint64_t countdown_start = 0;
@@ -354,6 +404,7 @@ int main() {
     uint64_t pause_frame_ms = 0;
     bool closing_pause = false;
     uint64_t round_start_ms = 0;
+    uint64_t results_start_ms = 0;
     bool error_to_main = false;
     FrameTiming timing;
     frame.delay_ms = 100;
@@ -409,19 +460,33 @@ int main() {
                     unsigned(song.guitar[0].size()), unsigned(song.guitar[1].size()),
                     unsigned(song.guitar[2].size()), unsigned(song.guitar[3].size()));
     };
+    const auto prepare_audio = [](const char *backing, const char *guitar = nullptr) {
+        return audio.prepare(backing, guitar, result_audio.playing() ? +[] { result_audio.poll(false); } : nullptr);
+    };
     const auto begin_countdown = [&] {
-        audio.stop();
+        frame.countdown = 0;
+        const auto &entry = songs[song_index];
+        const auto prep_start = timer_us_gettime64();
+        if (!prepare_audio(entry.backing.c_str(), entry.guitar.empty() ? nullptr : entry.guitar.c_str())) {
+            frame.screen = dc::Screen::error;
+            frame.error = audio.error();
+            return;
+        }
+        std::printf("FoFDC: audio prepared before countdown in %llu us\n",
+                    static_cast<unsigned long long>(timer_us_gettime64() - prep_start));
         round = dc::Round{};
         view.reset_effects();
         frame.gems = 0;
+        int end_ms = 0;
         for (const auto &target : song.guitar[frame.difficulty]) {
             frame.gems += dc::fret_count(target.frets);
+            end_ms = std::max(end_ms, *std::max_element(target.ends.begin(), target.ends.end()));
         }
         countdown_ms = 8 * song.initial_us_per_beat / 1000;
         frame.screen = dc::Screen::countdown;
         frame.time_ms = -int(countdown_ms) - frame.delay_ms - chart_delay_ms;
         frame.countdown = 8;
-        frame.duration_ms = 0;
+        frame.duration_ms = (end_ms + 1500) / 1000 * 1000;
         countdown_start = timer_ms_gettime64();
         timing = {};
         keyboard_reports.overflow = 0;
@@ -429,25 +494,21 @@ int main() {
     };
     const auto begin_audio = [&] {
         frame.countdown = 0;
-        const auto &entry = songs[song_index];
-        if (!audio.start(entry.backing.c_str(), entry.guitar.empty() ? nullptr : entry.guitar.c_str())) {
+        if (!audio.play_prepared()) {
             frame.screen = dc::Screen::error;
             frame.error = audio.error();
             return;
         }
         round_start_ms = timer_ms_gettime64();
-        int end_ms = 0;
-        for (const auto &target : song.guitar[frame.difficulty]) {
-            end_ms = std::max(end_ms, *std::max_element(target.ends.begin(), target.ends.end()));
-        }
-        frame.duration_ms = (end_ms + 1500) / 1000 * 1000;
         frame.time_ms = -frame.delay_ms - chart_delay_ms;
         processed_input = read_input();
+        blocked_frets = 0;
         processed_time = frame.time_ms;
         keyboard_reports.reset(processed_input);
         frame.screen = dc::Screen::play;
-        std::printf("FoFDC: playing difficulty=%u goals=%u gems=%u delay=%d\n", frame.difficulty,
-                    unsigned(song.guitar[frame.difficulty].size()), frame.gems, frame.delay_ms + chart_delay_ms);
+        std::printf("FoFDC: playing difficulty=%u goals=%u gems=%u delay=%d chart_start=%d\n", frame.difficulty,
+                    unsigned(song.guitar[frame.difficulty].size()), frame.gems, frame.delay_ms + chart_delay_ms,
+                    frame.time_ms);
         std::printf("FoFDC: memory heap_used=%u vram_free=%u aica_free=%u\n",
                     unsigned(mallinfo().uordblks), unsigned(pvr_mem_available()), unsigned(snd_mem_available()));
     };
@@ -455,9 +516,13 @@ int main() {
         if (audio.playing() || audio.resume()) {
             frame.screen = dc::Screen::play;
             frame.time_ms = audio.position_ms() - frame.delay_ms - chart_delay_ms;
-            processed_input = read_input();
+            const auto input = read_input();
+            blocked_frets = input.device == dc::InputDevice::keyboard
+                                ? uint8_t(input.frets & ~processed_input.frets) : 0;
+            processed_input = input;
+            processed_input.frets &= ~blocked_frets;
             processed_time = frame.time_ms;
-            keyboard_reports.reset(processed_input);
+            keyboard_reports.reset(input);
             timing.last = 0;
             std::printf("FoFDC: resumed %d ms\n", audio.position_ms());
         } else {
@@ -482,8 +547,18 @@ int main() {
 
     const auto resume_menu_music = [&] {
         audio.poll();
-        if (!audio.playing() && !audio.start("/rd/menu.ogg")) {
+        if (!audio.playing() && (!prepare_audio("/rd/menu.ogg") || !audio.play_prepared())) {
             std::printf("FoFDC: menu audio error: %s\n", audio.error());
+        }
+    };
+
+    const auto record_pick = [&](dc::Pick result, int when, uint8_t frets) {
+        audio.guitar_gain(round.guitar_muted ? 0.0f : 1.0f);
+        if (result == dc::Pick::hit) {
+            trace_input(InputTrace::hit, when, round.last_hit_ms - round.last_hit_offset_ms, frets, round);
+            view.record_pick(round);
+        } else if (result == dc::Pick::bad) {
+            sounds.play(static_cast<Effect>(miss1 + std::rand() % 6));
         }
     };
 
@@ -494,12 +569,28 @@ int main() {
                            input.buttons & ~previous_buttons : 0;
         previous_buttons = input.buttons;
         unsigned menu_frets = 0;
+        const auto &chart = song.guitar[frame.difficulty];
+        const bool pause_menu = frame.screen == dc::Screen::pause ||
+                                (frame.screen == dc::Screen::settings && settings_in_pause);
         if (frame.screen != dc::Screen::play || input.device != dc::InputDevice::keyboard) {
             KeyboardReport report;
             while (keyboard_reports.pop(report)) {
                 if (input.device == dc::InputDevice::keyboard) {
                     pressed |= report.pressed;
                     menu_frets |= report.pressed_frets;
+                    // Menu.keyPressed consumes presses. Its inherited
+                    // keyReleased still passes fret releases to GuitarScene.
+                    if (pause_menu && frame.countdown <= 0 && report.released_frets &&
+                        processed_input.device == dc::InputDevice::keyboard) {
+                        const dc::Rules rules{60000000.0f / song.initial_us_per_beat,
+                                              frame.delay_ms + chart_delay_ms};
+                        processed_input.frets &= ~report.released_frets;
+                        trace_input(InputTrace::report, frame.time_ms, report.state.buttons,
+                                    report.state.frets, round);
+                        record_pick(round.fret_edge(chart, frame.time_ms, processed_input.frets, rules, true),
+                                    frame.time_ms, processed_input.frets);
+                        trace_input(InputTrace::fret, frame.time_ms, 1, processed_input.frets, round);
+                    }
                 }
             }
         }
@@ -511,7 +602,6 @@ int main() {
                          (frame.input == dc::InputDevice::keyboard && (pressed & pick_up) ? 1 : 0);
         const int adjust = bool((pressed & nav_right) || (menu_frets & (1u << 3))) -
                            bool((pressed & nav_left) || (menu_frets & (1u << 2)));
-        const auto &chart = song.guitar[frame.difficulty];
         frame.caption = nullptr;
         frame.tutorial_picture = -1;
 
@@ -641,6 +731,15 @@ int main() {
                 break;
             }
             case dc::Screen::results:
+                frame.results_age_ms = static_cast<unsigned>(timer_ms_gettime64() - results_start_ms);
+                if (!frame.results_actions) {
+                    if (confirm || cancel || (frame.input == dc::InputDevice::keyboard && (pressed & pick_up))) {
+                        frame.results_actions = true;
+                        std::puts("FoFDC: results actions opened");
+                    }
+                    break;
+                }
+                [[fallthrough]];
             case dc::Screen::failed:
                 frame.selected = move_list(frame.selected, 3, step);
                 toggle(step);
@@ -686,16 +785,27 @@ int main() {
             } else if (!audio.playing()) {
                 round.finish(chart, frame.time_ms, rules);
                 const unsigned stars = round.rating(frame.gems);
+                const char *result_clip = nullptr;
                 if (!round.score) {
-                    sounds.play(no_points);
+                    result_clip = "/rd/fx/jurgen1.ogg";
                 } else if (round.gem_hits * 100 >= frame.gems * 99) {
-                    sounds.play(myhero);
+                    result_clip = "/rd/fx/myhero.ogg";
                 } else if (stars <= 1) {
-                    sounds.play(static_cast<Effect>(taunt1 + std::rand() % 4));
+                    constexpr const char *taunts[] = {
+                        "/rd/fx/jurgen2.ogg", "/rd/fx/jurgen3.ogg", "/rd/fx/jurgen4.ogg", "/rd/fx/jurgen5.ogg"
+                    };
+                    result_clip = taunts[std::rand() % 4];
                 } else if (stars == 5) {
-                    sounds.play(static_cast<Effect>(perfect1 + std::rand() % 3));
+                    constexpr const char *responses[] = {
+                        "/rd/fx/perfect1.ogg", "/rd/fx/perfect2.ogg", "/rd/fx/perfect3.ogg"
+                    };
+                    result_clip = responses[std::rand() % 3];
                 }
+                result_audio.schedule(result_clip);
                 frame.selected = 0;
+                results_start_ms = timer_ms_gettime64();
+                frame.results_age_ms = 0;
+                frame.results_actions = false;
                 frame.screen = dc::Screen::results;
                 std::printf("FoFDC: end pcm=%d elapsed=%llu frames=%u hit=%u miss=%u extra=%u score=%u\n",
                             audio.position_ms(),
@@ -708,53 +818,57 @@ int main() {
                 if (songs[song_index].tutorial) {
                     tutorial_cue(frame, tutorial);
                 }
-                const auto record_pick = [&](dc::Pick result) {
-                    audio.guitar_gain(round.guitar_muted ? 0.0f : 1.0f);
-                    if (result == dc::Pick::hit) {
-                        view.record_pick(round);
-                    } else if (result == dc::Pick::bad) {
-                        sounds.play(static_cast<Effect>(miss1 + std::rand() % 6));
-                    }
-                };
-                const auto process_input = [&](const Input &state, int when) {
+                const auto process_input = [&](Input state, int when, uint8_t releases = 0) {
+                    trace_input(InputTrace::report, when, state.buttons, state.frets, round);
                     if (state.device == processed_input.device) {
                         const auto edges = state.buttons & ~processed_input.buttons;
                         if (edges & pause_song) {
                             return false;
                         }
-                        if (state.frets != processed_input.frets) {
-                            record_pick(round.fret_edge(chart, when, state.frets, rules,
-                                                       (processed_input.frets & ~state.frets) != 0));
+                        blocked_frets &= state.frets;
+                        state.frets &= ~blocked_frets;
+                        if (state.frets != processed_input.frets || releases) {
+                            const bool released = releases || (processed_input.frets & ~state.frets);
+                            record_pick(round.fret_edge(chart, when, state.frets, rules, released),
+                                        when, state.frets);
+                            trace_input(InputTrace::fret, when, released, state.frets, round);
                         }
                         for (const auto pick : {pick_up, pick_down, pick_extra}) {
                             if (edges & pick) {
-                                record_pick(round.pick(chart, when, state.frets, rules, false));
+                                record_pick(round.pick(chart, when, state.frets, rules, false),
+                                            when, state.frets);
+                                trace_input(InputTrace::strum, when, pick, state.frets, round);
                             }
                         }
+                    } else {
+                        blocked_frets = 0;
                     }
                     processed_input = state;
                     processed_time = when;
                     return true;
                 };
                 bool keep_playing = true;
-                if (!interactive) {
-                    processed_input = {};
-                    processed_time = frame.time_ms;
-                } else if (input.device == dc::InputDevice::keyboard) {
+                if (interactive && input.device == dc::InputDevice::keyboard) {
+                    // The cursor is sampled before refilling the audio ring. Use
+                    // that sample's timestamp even when decoding takes a while.
+                    const auto sampled_at_us = audio.position_sampled_at_us();
                     KeyboardReport report;
-                    while (keep_playing && keyboard_reports.pop(report)) {
-                        const auto now = uint32_t(timer_ms_gettime64());
-                        const auto age = std::min<uint32_t>(now - report.timestamp, 1000);
+                    while (keep_playing && keyboard_reports.pop(report, sampled_at_us)) {
+                        const auto age_ms = (sampled_at_us - report.timestamp_us) / 1000;
                         keep_playing = process_input(report.state,
-                                                     std::max(processed_time, frame.time_ms - int(age)));
+                                                     std::max(processed_time, frame.time_ms - int(age_ms)),
+                                                     report.released_frets);
                     }
-                    if (keep_playing && (vblank_handle < 0 || processed_input.device != input.device)) {
+                    if (keep_playing && processed_input.device != input.device) {
                         keep_playing = process_input(input, frame.time_ms);
                     }
-                } else {
+                } else if (interactive) {
                     keep_playing = process_input(input, frame.time_ms);
                 }
-                record_pick(round.advance(chart, frame.time_ms, processed_input.frets, rules));
+                record_pick(round.advance(chart, frame.time_ms, processed_input.frets, rules),
+                            frame.time_ms, processed_input.frets);
+                trace_input(InputTrace::advance, frame.time_ms, 0, processed_input.frets, round);
+                processed_time = frame.time_ms;
                 if (keep_playing) {
                     timing.sample();
                 } else if (audio.pause()) {
@@ -768,7 +882,11 @@ int main() {
         }
 
         dc_gameplay_active = frame.screen == dc::Screen::play;
+        if (frame.screen == dc::Screen::play || (frame.screen == dc::Screen::pause && frame.countdown <= 0)) {
+            frame.held = processed_input.frets;
+        }
         record_round(round, frame.time_ms);
+        result_audio.poll(frame.screen == dc::Screen::results);
         view.draw(frame, song, round, songs);
     }
 }

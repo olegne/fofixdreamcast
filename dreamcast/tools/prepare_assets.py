@@ -80,6 +80,25 @@ def font_atlas(source, out, name):
     (out / (name + ".map")).write_bytes(widths)
 
 
+def title_numbers(source, out):
+    # Data.py opens title.ttf at 108 px. Only countdown and score use it.
+    font = ImageFont.truetype(str(source), 108)
+    baseline = font.getmetrics()[0]
+    alpha = Image.new("L", (512, 128))
+    painter = ImageDraw.Draw(alpha)
+    widths = bytearray()
+    for index, glyph in enumerate("0123456789"):
+        left, _, right, _ = font.getbbox(glyph, anchor="ls")
+        left = min(0, left)
+        x = 48 * index + 2  # transparent padding keeps bilinear sampling within the glyph
+        painter.text((x - left, baseline), glyph, font=font, fill=255, anchor="ls")
+        widths.append(max(right, round(font.getlength(glyph))) - left)
+    atlas = Image.new("RGBA", alpha.size, (255, 255, 255, 0))
+    atlas.putalpha(alpha)
+    texture(atlas, out / "title-font.tex")
+    (out / "title-font.map").write_bytes(widths)
+
+
 def polygons(source, factors, orient=lambda p: p):
     # key.dae lists an unused dangling #Scene before its real scene.
     document = Collada(str(source), ignore=[DaeBrokenRefError])
@@ -182,7 +201,7 @@ def main(data, out):
     texture(flat.resize((512, 512), Image.Resampling.LANCZOS), visual / "stage.tex", solid=True)
 
     font_atlas(data / "default.ttf", visual, "font")
-    font_atlas(data / "title.ttf", visual, "title-font")
+    title_numbers(data / "title.ttf", visual)
     notes = polygons(data / "note.dae", {"Mesh_001": 1.0, "Mesh": 0.75, "Mesh_002": 0.25})
     hopo = polygons(data / "note.dae", {"Mesh_003": 1.0})
     # Compose Guitar.renderFrets' Y(+90), X(-90), Z(-90) rotations in that order.

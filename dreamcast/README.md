@@ -13,11 +13,11 @@ No Flycast, selecione **Keyboard** como dispositivo da porta A.
 | Palhetar | Enter ou Shift direito |
 | Abrir e fechar a pausa | Esc |
 
-O jogo começa pelo menu principal. Em **Play Game**, selecione a música e a dificuldade. **Tutorial** abre o tutorial clássico. No teclado, feche a pausa com **Esc** ou **F2**. Como no clássico de PC, **Enter** em **Return to Song** toca o som de confirmação e mantém o menu aberto. Quando a pausa é aberta durante a contagem inicial, a faixa começa ao final da contagem mesmo com o menu aberto.
+O jogo começa pelo menu principal. Em **Play Game**, selecione a música e a dificuldade. **Tutorial** abre o tutorial clássico. No teclado, feche a pausa com **Esc** ou **F2**. Como no clássico de PC, **Enter** em **Return to Song** toca o som de confirmação e mantém o menu aberto. Quando a pausa é aberta durante a contagem inicial, a faixa começa ao final da contagem mesmo com o menu aberto. Depois do resultado, **Enter** ou **F1** abre as ações e confirma **Replay** ou outra opção.
 
 ## Compilação
 
-Requisitos do port. KallistiOS 2.2.1, libvorbis e libogg em kos-ports, mkdcdisc, Python 3 com Pillow e pycollada, e FFmpeg com o encoder Yamaha ADPCM.
+Requisitos do port. KallistiOS 2.2.1, SH4ZAM, libvorbis e libogg em kos-ports, mkdcdisc, Python 3 com Pillow e pycollada, e FFmpeg com o encoder Yamaha ADPCM.
 
 Extraia [FretsOnFire-1.3.110.tar.gz](https://sourceforge.net/projects/fretsonfire/files/fretsonfire/1.3.110/) em um diretório fora do checkout e use a pasta `data` como fonte dos gráficos, do áudio e dos charts.
 

@@ -13,7 +13,7 @@ endif
 include $(KOS_BASE)/Makefile.rules
 
 $(TARGET): $(OBJECTS)
-	kos-c++ -o $@ $^ -lvorbis -logg -lm
+	kos-c++ -o $@ $^ -Wl,--wrap=maple_queue_frame -lvorbis -logg -lsh4zam -lm
 
 romdisk.img: build/assets.stamp
 

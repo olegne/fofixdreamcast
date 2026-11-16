@@ -3,18 +3,22 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <new>
 #include <arch/timer.h>
 #include <dc/sound/aica_comm.h>
 #include <dc/sound/sfxmgr.h>
 #include <dc/sound/sound.h>
 #include <dc/spu.h>
 #include <kos/thread.h>
+#include <malloc.h>
 
 namespace dc {
 namespace {
 
 constexpr unsigned backing_volume = 255; // Frets on Fire defaults songvol to 1.0.
+constexpr unsigned cd_read_buffer_size = 16 * 1024;
 
 struct AicaCommand {
     alignas(32) uint32_t packet[AICA_CMDSTR_CHANNEL_SIZE]{};
@@ -34,6 +38,10 @@ struct AicaCommand {
 } // namespace
 
 bool Audio::start(const char *backing, const char *guitar) {
+    return prepare(backing, guitar) && play_prepared();
+}
+
+bool Audio::prepare(const char *backing, const char *guitar, PrepareService service) {
     stop();
     error_ = nullptr;
     rate_ = played_frames_ = 0;
@@ -42,32 +50,82 @@ bool Audio::start(const char *backing, const char *guitar) {
         fail("AICA initialization failed.");
         return false;
     }
-    if (!open(stems_[0], backing) || (guitar && !open(stems_[1], guitar))) {
+    if (!open(stems_[0], backing, service) || (guitar && !open(stems_[1], guitar, service))) {
         stop();
         return false;
     }
     length_frames_ = stems_[0].frames;
     for (auto &stem : stems_) {
         for (unsigned block = 0; stem.open && block < blocks; ++block) {
+            if (service) {
+                service();
+            }
             if (!fill(stem, block)) {
                 fail("Error decoding the audio track.");
                 return false;
             }
         }
+        stem.service = nullptr;
     }
+    prepared_ = true;
+    return true;
+}
+
+bool Audio::play_prepared() {
+    if (!prepared_) {
+        error_ = "Audio was not prepared.";
+        return false;
+    }
+    prepared_ = false;
     begin_stream(0);
     std::printf("FoFDC: audio %u Hz, backing=%u ch guitar=%u ch samples=%u\n",
                 rate_, stems_[0].channels, stems_[1].channels, length_frames_);
     return true;
 }
 
-bool Audio::open(Stem &stem, const char *path) {
+bool Audio::open(Stem &stem, const char *path, PrepareService service) {
+    if (service) {
+        service();
+    }
     auto *file = std::fopen(path, "rb");
     if (!file) {
         error_ = "Could not open an audio track.";
         return false;
     }
-    if (ov_open(file, &stem.decoder, nullptr, 0) != 0) {
+    if (std::strncmp(path, "/cd/", 4) == 0) {
+        // KOS can DMA whole ISO9660 sectors into a 32-byte-aligned buffer.
+        auto *buffer = static_cast<char *>(memalign(32, cd_read_buffer_size));
+        if (buffer && std::setvbuf(file, buffer, _IOFBF, cd_read_buffer_size) == 0) {
+            stem.read_buffer = buffer;
+        } else {
+            std::free(buffer);
+        }
+    }
+    stem.file = file;
+    stem.service = service;
+    // A result voice can still be playing when Replay loads two stems. Let
+    // it refill its own AICA ring between the file operations during prefill.
+    constexpr ov_callbacks serviced_file{
+        [](void *dst, size_t size, size_t count, void *user) {
+            const auto &input = *static_cast<Stem *>(user);
+            if (input.service) {
+                input.service();
+            }
+            return std::fread(dst, size, count, input.file);
+        },
+        [](void *user, ogg_int64_t offset, int whence) {
+            const auto &input = *static_cast<Stem *>(user);
+            if (input.service) {
+                input.service();
+            }
+            return std::fseek(input.file, offset, whence);
+        },
+        [](void *user) { return std::fclose(static_cast<Stem *>(user)->file); },
+        [](void *user) { return std::ftell(static_cast<Stem *>(user)->file); }
+    };
+    const int opened = service ? ov_open_callbacks(&stem, &stem.decoder, nullptr, 0, serviced_file) :
+                                 ov_open(file, &stem.decoder, nullptr, 0);
+    if (opened != 0) {
         std::fclose(file);
         error_ = "Invalid Ogg Vorbis audio track.";
         return false;
@@ -313,6 +371,7 @@ int Audio::position_ms() const {
 void Audio::stop() {
     halt();
     paused_ = false;
+    prepared_ = false;
     for (auto &stem : stems_) {
         for (unsigned i = 0; i < 2; ++i) {
             if (stem.channel[i] >= 0) {
@@ -328,6 +387,10 @@ void Audio::stop() {
             ov_clear(&stem.decoder);
             stem.open = false;
         }
+        stem.file = nullptr;
+        stem.service = nullptr;
+        std::free(stem.read_buffer);
+        stem.read_buffer = nullptr;
         stem.channels = stem.frames = stem.decoded = 0;
     }
 }
@@ -336,6 +399,41 @@ void Audio::fail(const char *message) {
     error_ = message;
     std::printf("FoFiXDC: %s\n", message);
     stop();
+}
+
+void ResultAudio::schedule(const char *path) {
+    pending_ = path;
+    scheduled_ms_ = timer_ms_gettime64();
+}
+
+void ResultAudio::poll(bool results_visible) {
+    if (audio_) {
+        audio_->poll();
+        if (!audio_->playing()) {
+            audio_.reset();
+        }
+    }
+    if (!results_visible) {
+        pending_ = nullptr;
+    }
+    // GameResultsScene plays a taunt after five seconds. Once started, the
+    // original SDL mixer lets it continue independently of the results scene.
+    if (!pending_ || timer_ms_gettime64() - scheduled_ms_ <= 5000) {
+        return;
+    }
+    const auto *path = pending_;
+    pending_ = nullptr;
+    if (!audio_) {
+        audio_.reset(new (std::nothrow) Audio);
+    }
+    if (!audio_) {
+        std::printf("FoFDC: could not allocate result audio for %s\n", path);
+    } else if (!audio_->start(path)) {
+        std::printf("FoFDC: could not start result audio %s: %s\n", path, audio_->error());
+        audio_.reset();
+    } else {
+        std::printf("FoFDC: result audio %s\n", path);
+    }
 }
 
 } // namespace dc

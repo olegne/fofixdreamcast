@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
+#include <cstdio>
 #include <cstdint>
+#include <memory>
 #define OV_EXCLUDE_STATIC_CALLBACKS
 #include <vorbis/vorbisfile.h>
 
@@ -9,8 +11,12 @@ namespace dc {
 
 class Audio {
 public:
+    using PrepareService = void (*)();
+
     ~Audio() { stop(); }
     bool start(const char *backing, const char *guitar = nullptr);
+    bool prepare(const char *backing, const char *guitar = nullptr, PrepareService service = nullptr);
+    bool play_prepared();
     void poll();
     bool pause();
     bool resume();
@@ -18,6 +24,7 @@ public:
     void guitar_gain(float volume);
 
     int position_ms() const;
+    uint64_t position_sampled_at_us() const { return last_poll_us_; }
     bool playing() const { return active_; }
     bool has_guitar() const { return stems_[1].open; }
     const char *error() const { return error_; }
@@ -29,6 +36,9 @@ private:
 
     struct Stem {
         OggVorbis_File decoder{};
+        std::FILE *file = nullptr;
+        PrepareService service = nullptr;
+        char *read_buffer = nullptr;
         int channel[2] = {-1, -1};
         uint32_t address[2] = {};
         unsigned channels = 0;
@@ -37,7 +47,7 @@ private:
         bool open = false;
     };
 
-    bool open(Stem &stem, const char *path);
+    bool open(Stem &stem, const char *path, PrepareService service);
     bool decode(Stem &stem, unsigned count);
     bool fill(Stem &stem, unsigned block);
     void begin_stream(unsigned position);
@@ -52,6 +62,7 @@ private:
     bool active_ = false;
     bool paused_ = false;
     bool clock_ready_ = false;
+    bool prepared_ = false;
     unsigned rate_ = 0;
     unsigned length_frames_ = 0;
     unsigned played_frames_ = 0;
@@ -60,6 +71,18 @@ private:
     unsigned guitar_volume_ = 255;
     uint64_t last_poll_us_ = 0;
     const char *error_ = nullptr;
+};
+
+class ResultAudio {
+public:
+    void schedule(const char *path);
+    void poll(bool results_visible);
+    bool playing() const { return audio_ && audio_->playing(); }
+
+private:
+    std::unique_ptr<Audio> audio_;
+    const char *pending_ = nullptr;
+    uint64_t scheduled_ms_ = 0;
 };
 
 } // namespace dc

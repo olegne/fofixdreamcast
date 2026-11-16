@@ -485,6 +485,7 @@ Pick Round::pick(const Chart &chart, int time_ms, uint8_t held, const Rules &rul
         played_.resize(chart.size());
     }
     played_[target] = true;
+    last_hit_target_ = target;
 
     ++hits;
     const auto gem_count = fret_count(chord.frets);

@@ -1,4 +1,4 @@
-"""Prepare the release's sound effects for the KallistiOS AICA loader."""
+"""Prepare short AICA effects and preserve the original streamed audio."""
 
 from pathlib import Path
 import shutil
@@ -9,6 +9,8 @@ def sounds(source: Path, output: Path):
     effects = (
         "in", "out", "crunch1", "crunch2", "crunch3", "start",
         "fiba1", "fiba2", "fiba3", "fiba4", "fiba5", "fiba6",
+    )
+    result_effects = (
         "jurgen1", "jurgen2", "jurgen3", "jurgen4", "jurgen5",
         "myhero", "perfect1", "perfect2", "perfect3",
     )
@@ -24,4 +26,7 @@ def sounds(source: Path, output: Path):
             ],
             check=True,
         )
+    for effect in result_effects:
+        name = effect + ".ogg"
+        shutil.copyfile(source / name, directory / name)
     shutil.copyfile(source / "menu.ogg", output / "menu.ogg")

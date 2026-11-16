@@ -22,6 +22,8 @@ struct Frame {
     int board_speed = 100;
     float countdown = 0.0f;
     float pause_visibility = 0.0f;
+    unsigned results_age_ms = 0;
+    bool results_actions = false;
     unsigned selected = 0;
     unsigned difficulty = 0;
     unsigned gems = 0;
@@ -71,9 +73,36 @@ private:
 
     using Mesh = std::vector<Face>;
 
+    struct NoteCorner {
+        size_t point;
+        uint32_t flags;
+        std::array<uint32_t, 5> colors;
+    };
+
+    struct NoteMesh {
+        std::vector<std::array<float, 3>> points;
+        std::vector<NoteCorner> corners;
+        std::vector<pvr_vertex_t> projected;
+    };
+
+    struct NoteMeshRange {
+        size_t first = 0;
+        size_t last = 0;
+        unsigned last_lane_end = 0;
+
+        bool contains(size_t target, unsigned lane) const {
+            return target >= first && (target < last || (target == last && lane < last_lane_end));
+        }
+    };
+
     bool load_texture(TextureId id, const char *name, bool opaque, bool repeat = false,
                       bool additive = false);
     bool load_mesh(const char *name, Mesh &mesh);
+    bool prepare_note_mesh(const char *name, NoteMesh &mesh);
+    bool prepare_frets();
+    static pvr_vertex_t mesh_vertex(const MeshVertex &point, float x, float y, float z,
+                                    uint32_t color, bool last);
+    void material(const pvr_poly_hdr_t &header);
     void sprite(TextureId id, float left, float top, float width, float height, float depth,
                 float u0 = 0, float v0 = 0, float u1 = 1, float v1 = 1,
                 uint32_t color = 0xffffffff);
@@ -83,12 +112,14 @@ private:
                     float u0, float v0, float u1, float v1,
                     uint32_t back = 0xffffffff, uint32_t front = 0xffffffff);
     void text(float x, float y, const char *line, float size, uint32_t color,
-              bool centered = false, bool title = false, float depth_offset = 0);
-    void text_line(float x, float y, const char *line, float size, uint32_t color, bool title, float depth);
-    void mesh(const Mesh &shape, float x, float y, float z, uint32_t color);
-    void draw_tail_wave(unsigned lane, float end, int time);
+              bool centered = false, float depth_offset = 0);
+    void text_line(float x, float y, const char *line, float size, uint32_t color, float depth);
+    void title_number(float y, const char *digits, float size, uint32_t color);
+    void note_mesh(NoteMesh &mesh, unsigned lane, float z);
+    void draw_tail_wave(unsigned lane, const Chord &note, int position_ms, float period_ms,
+                        float guitar_time_ms);
     void world(const Frame &frame, const SongChart &song, const Round &round,
-               const Chart &chart, float period_ms);
+               const Chart &chart, float period_ms, const NoteMeshRange &meshes);
     void update_stage(int time_ms, float beat_period);
     void stage_decoration(int time_ms);
     void stage_lights(const Frame &frame, const Round &round);
@@ -100,7 +131,8 @@ private:
               const std::vector<SongEntry> &library);
 
     std::array<Texture, texture_count> textures_{};
-    std::array<std::array<uint8_t, 95>, 2> widths_{};
+    std::array<uint8_t, 95> widths_{};
+    std::array<uint8_t, 10> digit_widths_{};
     std::array<float, 4> recent_lanes_{};
     std::array<float, 5> beat_lanes_{};
     size_t recent_pick_count_ = 0;
@@ -109,8 +141,12 @@ private:
     int stage_beat_ = 0;
     int last_stage_beat_ms_ = -1;
     int last_multiplier_ms_ = -1;
+    uint64_t guitar_time_origin_ms_ = 0;
     pvr_poly_hdr_t mesh_header_{}, overlay_header_{}, glow_header_{};
-    Mesh regular_note_, tap_marker_, fret_key_;
+    const pvr_poly_hdr_t *active_header_ = nullptr;
+    pvr_dr_state_t direct_{};
+    NoteMesh regular_note_, tap_marker_;
+    std::array<std::array<std::vector<pvr_vertex_t>, 2>, 5> frets_;
 };
 
 } // namespace dc

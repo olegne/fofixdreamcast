@@ -73,6 +73,9 @@ public:
     unsigned rating(unsigned gems) const;
     int sustained_until() const { return sustain_end_ms_; }
     bool was_hit(size_t target) const { return target < played_.size() && played_[target]; }
+    const Chord *sustaining_chord(const Chart &chart) const {
+        return sustain_frets && last_hit_target_ < chart.size() ? &chart[last_hit_target_] : nullptr;
+    }
 
     size_t next = 0;
     unsigned score = 0;
@@ -104,6 +107,7 @@ private:
     std::optional<int> last_pick_ms_;
     std::optional<int> pending_pick_ms_;
     bool sustain_tappable_ = false;
+    size_t last_hit_target_ = 0;
     std::vector<bool> played_;
 };
 
