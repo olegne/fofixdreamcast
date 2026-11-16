@@ -11,9 +11,9 @@ No Flycast, selecione **Keyboard** como dispositivo da porta A.
 | Escolher opção | Setas, Enter ou F1 para confirmar |
 | Cinco casas | F1 a F5 |
 | Palhetar | Enter ou Shift direito |
-| Pausar e retomar | Esc |
+| Abrir e fechar a pausa | Esc |
 
-O jogo começa pelo menu principal. Em **Play Game**, selecione a música e a dificuldade. **Tutorial** abre o tutorial clássico.
+O jogo começa pelo menu principal. Em **Play Game**, selecione a música e a dificuldade. **Tutorial** abre o tutorial clássico. No teclado, feche a pausa com **Esc** ou **F2**. Como no clássico de PC, **Enter** em **Return to Song** toca o som de confirmação e mantém o menu aberto. Quando a pausa é aberta durante a contagem inicial, a faixa começa ao final da contagem mesmo com o menu aberto.
 
 ## Compilação
 

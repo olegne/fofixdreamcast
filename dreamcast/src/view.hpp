@@ -10,7 +10,7 @@
 namespace dc {
 
 enum class Screen {
-    menu, settings, setlist, difficulty, countdown, play, pause, resume_countdown, results, failed, error
+    menu, settings, setlist, difficulty, countdown, play, pause, results, failed, error
 };
 enum class InputDevice { none, keyboard, controller };
 
@@ -20,7 +20,8 @@ struct Frame {
     int duration_ms = 0;
     int delay_ms = 0;
     int board_speed = 100;
-    int countdown = 3;
+    float countdown = 0.0f;
+    float pause_visibility = 0.0f;
     unsigned selected = 0;
     unsigned difficulty = 0;
     unsigned gems = 0;
@@ -38,6 +39,8 @@ struct Frame {
 class View {
 public:
     bool init();
+    void reset_effects();
+    void record_pick(const Round &round);
     void draw(const Frame &frame, const SongChart &song, const Round &round,
               const std::vector<SongEntry> &library);
 
@@ -80,15 +83,17 @@ private:
                     float u0, float v0, float u1, float v1,
                     uint32_t back = 0xffffffff, uint32_t front = 0xffffffff);
     void text(float x, float y, const char *line, float size, uint32_t color,
-              bool centered = false, bool title = false);
-    void text_line(float x, float y, const char *line, float size, uint32_t color, bool title);
+              bool centered = false, bool title = false, float depth_offset = 0);
+    void text_line(float x, float y, const char *line, float size, uint32_t color, bool title, float depth);
     void mesh(const Mesh &shape, float x, float y, float z, uint32_t color);
     void draw_tail_wave(unsigned lane, float end, int time);
     void world(const Frame &frame, const SongChart &song, const Round &round,
                const Chart &chart, float period_ms);
-    void stage_decoration(float beat_phase);
+    void update_stage(int time_ms, float beat_period);
+    void stage_decoration(int time_ms);
     void stage_lights(const Frame &frame, const Round &round);
     void draw_stats(const Frame &frame, const Round &round, const Rules &rules);
+    void multiplier_effect(const Frame &frame, const Round &round, float song_period);
     void menu_backdrop(const Frame &frame);
     void setlist(const Frame &frame, const std::vector<SongEntry> &library);
     void menu(const Frame &frame, const Round &round,
@@ -96,6 +101,14 @@ private:
 
     std::array<Texture, texture_count> textures_{};
     std::array<std::array<uint8_t, 95>, 2> widths_{};
+    std::array<float, 4> recent_lanes_{};
+    std::array<float, 5> beat_lanes_{};
+    size_t recent_pick_count_ = 0;
+    size_t beat_lane_count_ = 1;
+    float stage_beat_period_ = 500.0f;
+    int stage_beat_ = 0;
+    int last_stage_beat_ms_ = -1;
+    int last_multiplier_ms_ = -1;
     pvr_poly_hdr_t mesh_header_{}, overlay_header_{}, glow_header_{};
     Mesh regular_note_, tap_marker_, fret_key_;
 };

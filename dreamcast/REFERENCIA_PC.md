@@ -21,6 +21,12 @@ A camada de compatibilidade expõe os nomes antigos `Image`, `PngImagePlugin`, `
 
 Em uma medição isolada, a saída capturada ao reproduzir Defy no mixer do jogo obteve correlação acima de 0,999999969 e erro RMS de até 1,15 níveis PCM em quatro janelas de meio segundo. As janelas incluem os dois stems em 1,0, a guitarra silenciada e a volta de uma pausa. O relógio `mixer.music.get_pos()` apresenta um salto transitório ao retomar, antes do próximo callback. O PCM confirma a retomada no cursor original. O replay aguarda a estabilização desse relógio na retomada.
 
+## Contagem e pausa
+
+No pacote oficial executado, Esc abriu o menu durante a contagem de oito batidas. A cena continuou avançando e iniciou as duas trilhas ao chegar a zero com o menu aberto. Durante a faixa, Esc pausou as duas trilhas. Enter em **Return to Song** acionou a confirmação e manteve o menu aberto. Um segundo Esc iniciou a transição de 512 ms do código original. O callback do menu retomou o áudio quando a camada desapareceu.
+
+O cursor da pista durante a contagem equivale ao cursor de áudio menos as batidas restantes convertidas em milissegundos, menos o atraso A/V. A captura usou os 100 ms padrão. Em uma cópia isolada da instalação com `delay = 75` no `song.ini` de Defy, a primeira contagem usou 175 ms e o fechamento da pausa recarregou os 100 ms globais. O MIDI, as trilhas e os fontes permaneceram os do pacote. A regra vem de `GuitarSceneClient.songLoaded`, `getSongPosition` e `resumeGame`.
+
 ## Aparência histórica
 
 As sete capturas oficiais de 640 × 480 mostram o logotipo em chamas, os cassetes, as dificuldades, os refletores, os trastes, o placar, o editor e o resultado. A quarta imagem, de uma partida de guitarra com palco verde, está preservada desde 2007. A revisão interna dessas imagens é desconhecida. [Galeria oficial](https://fretsonfire.sourceforge.net/screenshots/) · [Arquivo da captura de jogo](https://commons.wikimedia.org/wiki/File:Fretsonfire4.png)
