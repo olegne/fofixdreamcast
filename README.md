@@ -13,6 +13,10 @@ This is Frets on Fire X, a highly customizable rhythm game supporting many modes
 [![Latest packaged version(s)](https://repology.org/badge/latest-versions/fofix.svg)](https://repology.org/project/fofix/versions)
 
 
+## Dreamcast
+
+The native Dreamcast prototype uses KallistiOS. See the [Dreamcast build and controls](dreamcast/README.md).
+
 ## Install
 
 To install the game, you can read the [installation guide](https://fofix.readthedocs.io/en/latest/quickstart/installation.html).

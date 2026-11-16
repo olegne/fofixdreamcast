@@ -1,0 +1,7 @@
+/build/
+*.d
+*.o
+*.elf
+*.cdi
+/romdisk.img
+/romdisk_tmp.c
