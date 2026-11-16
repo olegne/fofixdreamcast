@@ -5,7 +5,6 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
-#include <string_view>
 #include <utility>
 
 namespace dc {
@@ -66,23 +65,16 @@ struct Gem {
     uint32_t tick;
     uint32_t end;
     uint8_t pitch;
+    unsigned tempo_at_off;
+    bool tappable = false;
 };
-
-bool is_guitar(std::string_view name) {
-    return name == "PART GUITAR" || name == "T1 GEMS" || name == "Click" ||
-           name == "Midi Out";
-}
 
 bool is_gem(uint8_t pitch) {
     return pitch >= 60 && pitch <= 100 && (pitch - 60) % 12 < 5;
 }
 
-bool is_phrase(uint8_t pitch) {
-    return pitch == 103 || pitch == 116;
-}
-
 bool read_track(Reader track, std::vector<Tempo> &tempos,
-                std::vector<Gem> &gems, std::string_view &name) {
+                std::vector<Gem> &gems, bool has_notes) {
     uint32_t tick = 0;
     uint8_t running_status = 0;
     std::array<uint32_t, 16 * 128> held;
@@ -117,9 +109,6 @@ bool read_track(Reader track, std::vector<Tempo> &tempos,
             if (*type == 0x2f) {
                 return length == 0 && !track.remaining();
             }
-            if (*type == 0x03 && name.empty()) {
-                name = {reinterpret_cast<const char *>(payload), length};
-            }
             if (*type == 0x51) {
                 if (length != 3 || tempos.size() == max_events) {
                     return false;
@@ -153,7 +142,7 @@ bool read_track(Reader track, std::vector<Tempo> &tempos,
         }
         running_status = status;
         const auto pitch = data[0];
-        if ((command != 0x80 && command != 0x90) || (!is_gem(pitch) && !is_phrase(pitch))) {
+        if (!has_notes || (command != 0x80 && command != 0x90) || !is_gem(pitch)) {
             continue;
         }
         auto &start = held[(status & 0x0f) * 128 + pitch];
@@ -163,7 +152,7 @@ bool read_track(Reader track, std::vector<Tempo> &tempos,
             if (gems.size() == max_events) {
                 return false;
             }
-            gems.push_back({start, tick, pitch});
+            gems.push_back({start, tick, pitch, tempos.empty() ? 500000u : tempos.back().us_per_beat});
             start = unheld;
         }
     }
@@ -171,11 +160,19 @@ bool read_track(Reader track, std::vector<Tempo> &tempos,
 }
 
 bool matches(uint8_t frets, uint8_t held) {
-    if (fret_count(frets) > 1) {
-        return frets == held;
-    }
-    // Holding lower frets is legal during a single note.
-    return (held & ~(frets - 1)) == frets;
+    const auto highest_required = 32u - __builtin_clz(unsigned(frets));
+    // Every required fret must be down. Extra frets below the highest required
+    // fret are legal even when the target is a chord.
+    return (held & frets) == frets && !(held >> highest_required);
+}
+
+int64_t start_us(const Chord &chord) {
+    return int64_t(chord.time_ms) * 1000 + chord.start_us_remainder;
+}
+
+bool before_last_bucket(const Chord &chord, int64_t window_end_us) {
+    // Track.getEvents omits the 50 ms bucket containing its upper bound.
+    return chord.time_ms / 50 < window_end_us / 50000;
 }
 
 bool parse_chart(const std::vector<uint8_t> &bytes, SongChart &song, std::string &error) {
@@ -200,7 +197,7 @@ bool parse_chart(const std::vector<uint8_t> &bytes, SongChart &song, std::string
     }
 
     std::vector<Gem> guitar;
-    std::vector<Tempo> tempos{{0, 500000}};
+    std::vector<Tempo> tempos;
     for (unsigned i = 0; i < tracks; ++i) {
         chunk = file.take(8);
         if (!chunk || std::memcmp(chunk, "MTrk", 4) != 0) {
@@ -209,15 +206,11 @@ bool parse_chart(const std::vector<uint8_t> &bytes, SongChart &song, std::string
         }
         const auto track_size = be32(chunk + 4);
         const auto *start = file.take(track_size);
-        std::vector<Gem> gems;
-        std::string_view name;
-        if (!start || !read_track({start, start + track_size}, tempos, gems, name)) {
+        // The 1.3.110 MidiReader looks at the first two MIDI tracks, regardless
+        // of their names. Later tracks can still supply tempo metadata.
+        if (!start || !read_track({start, start + track_size}, tempos, guitar, i < 2)) {
             error = "Invalid MIDI event.";
             return false;
-        }
-        if (guitar.empty() && (is_guitar(name) || (tracks == 1 && name.empty())) &&
-            std::any_of(gems.begin(), gems.end(), [](const Gem &gem) { return is_gem(gem.pitch); })) {
-            guitar = std::move(gems);
         }
     }
     if (guitar.empty()) {
@@ -225,18 +218,22 @@ bool parse_chart(const std::vector<uint8_t> &bytes, SongChart &song, std::string
         return false;
     }
 
+    SongChart parsed;
+    if (!tempos.empty()) {
+        parsed.initial_us_per_beat = tempos.front().us_per_beat;
+    }
+    tempos.insert(tempos.begin(), {0, parsed.initial_us_per_beat});
     std::stable_sort(tempos.begin(), tempos.end(),
                      [](const Tempo &a, const Tempo &b) { return a.tick < b.tick; });
-    SongChart parsed;
-    const unsigned divisor = unsigned(ppqn) * 1000;
     for (size_t i = 0; i < tempos.size(); ++i) {
         auto &tempo = tempos[i];
         if (i) {
             const auto &prev = tempos[i - 1];
             tempo.scaled_time = prev.scaled_time + uint64_t(tempo.tick - prev.tick) * prev.us_per_beat;
         }
-        if (tempo.scaled_time / divisor <= max_song_ms) {
-            parsed.tempos.push_back({static_cast<int>(tempo.scaled_time / divisor), tempo.us_per_beat});
+        const auto time_ms = tempo.scaled_time / ppqn / 1000;
+        if (time_ms <= max_song_ms) {
+            parsed.tempos.push_back({static_cast<int>(time_ms), tempo.us_per_beat});
         }
     }
 
@@ -246,82 +243,72 @@ bool parse_chart(const std::vector<uint8_t> &bytes, SongChart &song, std::string
                                              return value < tempo.tick;
                                          });
         const auto &tempo = *(it - 1);
-        return (tempo.scaled_time + uint64_t(tick - tempo.tick) * tempo.us_per_beat) / divisor;
+        return double(tempo.scaled_time + uint64_t(tick - tempo.tick) * tempo.us_per_beat) / ppqn;
     };
+
+    struct TapGroup {
+        std::vector<Gem *> gems;
+        double ticks = 0.0;
+    };
+    std::array<TapGroup, 4> previous_groups;
+    std::array<TapGroup, 4> current_groups;
+    // Track.update visits NoteOff insertion order before sorting for display.
+    // It classifies each pending group when a new group begins.
+    for (auto &gem : guitar) {
+        const auto difficulty = 3 - (gem.pitch - 60) / 12;
+        auto &previous = previous_groups[difficulty];
+        auto &current = current_groups[difficulty];
+        const double ticks = time_of(gem.tick) * 480 / gem.tempo_at_off;
+        if (ticks >= current.ticks + 1e-3) {
+            if (previous.gems.size() == 1) {
+                const auto &prior = *previous.gems.front();
+                const double length = time_of(prior.end) - time_of(prior.tick);
+                const double previous_end = previous.ticks + length * 480 / gem.tempo_at_off;
+                if (current.ticks - previous_end <= 161 &&
+                    std::none_of(current.gems.begin(), current.gems.end(),
+                                 [&](const Gem *note) { return note->pitch == prior.pitch; })) {
+                    for (auto *note : current.gems) {
+                        note->tappable = true;
+                    }
+                }
+            }
+            std::swap(previous, current);
+            current.gems.clear();
+            current.ticks = ticks;
+        }
+        current.gems.push_back(&gem);
+    }
 
     std::stable_sort(guitar.begin(), guitar.end(),
                      [](const Gem &a, const Gem &b) { return a.tick < b.tick; });
-    std::vector<Gem> phrases;
+    std::array<uint32_t, 4> last_tick_by_difficulty{unheld, unheld, unheld, unheld};
     uint32_t last_tick = 0;
     for (const auto &gem : guitar) {
-        if (is_phrase(gem.pitch)) {
-            phrases.push_back(gem);
-            continue;
-        }
-        const auto time = time_of(gem.tick);
-        const auto end = time_of(gem.end);
-        if (end > max_song_ms) {
+        const auto time_us = uint64_t(time_of(gem.tick));
+        const auto end_us = uint64_t(time_of(gem.end));
+        if (end_us / 1000 > max_song_ms) {
             error = "The chart exceeds the maximum playback length.";
             return false;
         }
-        auto &track = parsed.guitar[3 - (gem.pitch - 60) / 12];
+        const auto difficulty = 3 - (gem.pitch - 60) / 12;
+        auto &track = parsed.guitar[difficulty];
         const auto fret = (gem.pitch - 60) % 12;
-        if (track.empty() || track.back().time_ms != static_cast<int>(time)) {
-            track.push_back({static_cast<int>(time)});
+        if (last_tick_by_difficulty[difficulty] != gem.tick) {
+            track.push_back({static_cast<int>(time_us / 1000)});
+            track.back().start_us_remainder = time_us % 1000;
+            track.back().hopo = true;
+            last_tick_by_difficulty[difficulty] = gem.tick;
         }
-        track.back().frets |= 1u << fret;
-        track.back().ends[fret] = std::max(track.back().ends[fret], static_cast<int>(end));
+        auto &target = track.back();
+        target.frets |= 1u << fret;
+        target.hopo &= gem.tappable;
+        if (end_us > uint64_t(target.ends[fret]) * 1000 + target.end_us_remainders[fret]) {
+            target.ends[fret] = static_cast<int>(end_us / 1000);
+            target.end_us_remainders[fret] = end_us % 1000;
+        }
         last_tick = std::max(last_tick, gem.end);
     }
 
-    for (auto &track : parsed.guitar) {
-        for (size_t i = 1; i < track.size(); ++i) {
-            auto &chord = track[i];
-            const auto &previous = track[i - 1];
-            const auto quarter_ms = parsed.us_per_beat(chord.time_ms) / 1000.0f;
-            chord.hopo = fret_count(chord.frets) == 1 && chord.frets != previous.frets &&
-                         chord.time_ms - previous.time_ms <= quarter_ms * (170.0f / 480.0f);
-        }
-        if (phrases.size() < 2) {
-            unsigned total = 0;
-            for (const auto &target : track) {
-                total += fret_count(target.frets);
-            }
-            const unsigned phrases_in_track = total / 120;
-            if (phrases_in_track > 0) {
-                const unsigned spacing = total / phrases_in_track;
-                const unsigned offset = phrases_in_track / 4;
-                unsigned ordinal = 0;
-                for (auto &target : track) {
-                    const auto end = ordinal + fret_count(target.frets);
-                    for (auto gem = ordinal; gem < end; ++gem) {
-                        if (gem >= offset && (gem - offset) / spacing < phrases_in_track &&
-                            (gem - offset) % spacing <= 10) {
-                            target.power_phrase = static_cast<int>((gem - offset) / spacing);
-                            target.phrase_end |= (gem - offset) % spacing == 10;
-                        }
-                    }
-                    ordinal = end;
-                }
-            }
-            continue;
-        }
-        for (size_t i = 0; i < phrases.size(); ++i) {
-            const auto start = time_of(phrases[i].tick);
-            const auto end = time_of(phrases[i].end);
-            if (start >= end || end > max_song_ms) {
-                continue;
-            }
-            const auto at = [](const Chord &chord, int time_ms) { return chord.time_ms < time_ms; };
-            const auto first = std::lower_bound(track.begin(), track.end(), static_cast<int>(start), at);
-            const auto last = std::lower_bound(first, track.end(), static_cast<int>(end), at);
-            for (auto it = first; it != last; ++it) {
-                it->power_phrase = static_cast<int>(i);
-                it->phrase_end = it + 1 == last;
-            }
-        }
-    }
-    // FoFiX draws the bar, beat and half-beat lines independently of the notes.
     const auto final_tick = std::min<uint64_t>(uint64_t(last_tick) + 2u * ppqn, unheld - 1);
     for (uint64_t eighth = 0; eighth * ppqn / 2 <= final_tick; ++eighth) {
         if (parsed.beats.size() == max_events) {
@@ -330,7 +317,7 @@ bool parse_chart(const std::vector<uint8_t> &bytes, SongChart &song, std::string
         }
         const auto tick = static_cast<uint32_t>(eighth * ppqn / 2);
         const auto time = time_of(tick);
-        parsed.beats.push_back({static_cast<int>(time), eighth % 8 == 0 ? 2u : unsigned(eighth % 2 == 0)});
+        parsed.beats.push_back({static_cast<int>(time / 1000), eighth % 8 == 0 ? 2u : unsigned(eighth % 2 == 0)});
     }
     song = std::move(parsed);
     return true;
@@ -369,156 +356,180 @@ unsigned SongChart::us_per_beat(int time_ms) const {
     return it == tempos.begin() ? 500000u : (it - 1)->us_per_beat;
 }
 
-Rules::Rules(float bpm) {
-    const auto capped = std::min(bpm, 200.0f);
-    late_ms = 250.0f - capped / 5.0f - 70.0f * 1.2f;
-    early_ms = late_ms;
-    release_ms = 200.0f - capped / 5.0f - 70.0f * 0.5f;
-    sustain_threshold_ms = 1.1f * 60000.0f / bpm / 4.0f;
-}
+Rules::Rules(float bpm, int delay)
+    : early_ms(60000.0f / bpm / 3.5f),
+      late_ms(early_ms),
+      release_ms(60000.0f / bpm / 2.0f),
+      sustain_threshold_ms(1.1f * 60000.0f / bpm / 4.0f),
+      window_us(static_cast<int>(early_ms * 1000)),
+      release_us(static_cast<int>(release_ms * 1000)),
+      sustain_threshold_us(static_cast<int>(sustain_threshold_ms * 1000)),
+      delay_ms(delay) {}
 
 unsigned Round::multiplier() const {
-    return (1 + std::min(streak / 10, 3u)) * (power_active ? 2 : 1);
+    return 1 + std::min(streak / 10, 3u);
 }
 
 unsigned Round::sustain_points(int time_ms, const Rules &rules) const {
-    const int duration = std::min(time_ms, sustain_end_ms_) - sustain_start_ms_;
-    return sustain_frets && duration > rules.sustain_threshold_ms
-               ? static_cast<unsigned>(0.1f * duration * fret_count(sustain_frets))
+    const auto duration = std::min(int64_t(time_ms) * 1000 - sustain_start_us_,
+                                   sustain_length_us_);
+    return sustain_frets && duration > rules.sustain_threshold_us
+               ? static_cast<unsigned>(duration * fret_count(sustain_frets) / 10000)
                : 0u;
 }
 
 unsigned Round::display_score(int time_ms, const Rules &rules) const {
-    return score + sustain_points(time_ms, rules) * multiplier();
+    return score + sustain_points(time_ms, rules);
 }
 
-unsigned Round::rating(unsigned gems, size_t targets, int time_ms, const Rules &rules) const {
-    if (!gems || !targets) {
-        return 0;
-    }
-    // The default FoFiX RB+GH thresholds use average score per gem.
-    const float average = display_score(time_ms, rules) / (gems * 50.0f);
-    if (average > 5.3f) {
-        return 6;
-    }
-    constexpr float thresholds[] = {0.25f, 0.5f, 1.0f, 2.0f, 3.0f};
-    return std::upper_bound(std::begin(thresholds), std::end(thresholds), average) -
-           std::begin(thresholds);
+unsigned Round::rating(unsigned gems) const {
+    // The original uses floor(5 * (notesHit / totalNotes + 0.05)).
+    return gems ? (20 * gem_hits + gems) / (4 * gems) : 0u;
 }
 
 void Round::end_sustain(int time_ms, const Rules &rules) {
-    score += sustain_points(time_ms, rules) * multiplier();
-    sustain_frets = 0;
-}
-
-bool Round::activate_power() {
-    if (power_active || power < 50.0f) {
-        return false;
+    if (sustain_frets) {
+        score += sustain_points(time_ms, rules) * multiplier();
+        // Guitar.endPick uses the uncorrected audio time only for muting.
+        if ((int64_t(time_ms) + rules.delay_ms) * 1000 + rules.release_us < last_gem_end_us_) {
+            guitar_muted = true;
+        }
+        sustain_frets = 0;
     }
-    power_active = true;
-    return true;
 }
 
 void Round::miss(const Chord &chord) {
-    rock_loss_ += 2.0f / (power_active ? 2.0f : 1.0f);
-    rock = std::max(0.0f, rock - rock_loss_ / (power_active ? 2.0f : 1.0f));
-    rock_gain_ = std::max(15.0f, rock_gain_ - 14.0f);
     ++misses;
-    streak = 0;
-    chain_ = last_was_tap_ = false;
-    guitar_muted = true;
-    if (chord.power_phrase >= 0) {
-        broken_phrase_ = chord.power_phrase;
-    }
+    gem_misses += fret_count(chord.frets);
 }
 
-void Round::advance(const Chart &chart, int time_ms, uint8_t held, const Rules &rules) {
-    if (previous_time_ms_ >= 0 && power_active) {
-        power = std::max(0.0f, power - std::max(0, time_ms - previous_time_ms_) / 200.0f);
-        power_active = power > 0.0f;
+size_t Round::required_target(const Chart &chart, int time_ms, const Rules &rules) const {
+    const auto pos = int64_t(time_ms) * 1000;
+    size_t index = next;
+    while (index < chart.size() && start_us(chart[index]) < pos - rules.window_us) {
+        ++index;
     }
-    previous_time_ms_ = time_ms;
+    if (index < chart.size() && before_last_bucket(chart[index], pos + rules.window_us)) {
+        return index;
+    }
+    return chart.size();
+}
 
-    if (sustain_frets && (time_ms >= sustain_end_ms_ || (held & sustain_frets) != sustain_frets)) {
-        if (time_ms + rules.release_ms < sustain_end_ms_) {
-            guitar_muted = true;
-        }
+Pick Round::advance(const Chart &chart, int time_ms, uint8_t held, const Rules &rules) {
+    const auto pos = int64_t(time_ms) * 1000;
+    if (sustain_frets && pos > sustain_end_us_) {
         end_sustain(time_ms, rules);
     }
-    while (next < chart.size() && time_ms > chart[next].time_ms + rules.late_ms) {
+    while (next < chart.size() && start_us(chart[next]) < pos - rules.window_us) {
         miss(chart[next++]);
     }
+
+    if (!sustain_frets) {
+        const auto first = std::lower_bound(chart.begin(), chart.end(), pos - 2 * rules.window_us,
+                                            [](const Chord &chord, int64_t time_us) {
+                                                return start_us(chord) < time_us;
+                                            });
+        for (auto it = first; it != chart.end() && before_last_bucket(*it, pos - rules.window_us); ++it) {
+            if (!was_hit(static_cast<size_t>(it - chart.begin()))) {
+                guitar_muted = true;
+                streak = 0;
+                break;
+            }
+        }
+    }
+
+    if (pending_pick_ms_ && time_ms > *pending_pick_ms_) {
+        pending_pick_ms_.reset();
+        const auto target = required_target(chart, time_ms, rules);
+        if (target < chart.size() && matches(chart[target].frets, held)) {
+            return pick(chart, time_ms, held, rules, false);
+        }
+    }
+    return Pick::neutral;
 }
 
 Pick Round::pick(const Chart &chart, int time_ms, uint8_t held, const Rules &rules, bool tap) {
-    if (!held || time_ms < 0 || (tap && !chain_)) {
+    if (!tap && !held) {
+        pending_pick_ms_ = time_ms + 30;
         return Pick::neutral;
     }
-    size_t target = next;
-    while (target < chart.size() && chart[target].time_ms <= time_ms + rules.early_ms) {
-        const auto &chord = chart[target];
-        if (matches(chord.frets, held) && (!tap || chord.hopo)) {
-            break;
-        }
-        if (tap) {
-            return Pick::neutral;
-        }
-        ++target;
+    if (!tap) {
+        pending_pick_ms_.reset();
     }
-    if (target == chart.size() || chart[target].time_ms > time_ms + rules.early_ms) {
-        if (tap || (last_was_tap_ && time_ms - last_hit_ms <= rules.late_ms &&
-                    matches(last_hit_frets, held))) {
-            return Pick::neutral;
-        }
-        end_sustain(time_ms, rules);
-        ++overstrums;
-        streak = 0;
-        chain_ = last_was_tap_ = false;
-        rock_loss_ += 0.4f;
-        rock = std::max(0.0f, rock - rock_loss_ / 5.0f);
-        rock_gain_ = std::max(15.0f, rock_gain_ - 2.8f);
-        guitar_muted = true;
-        return Pick::bad;
+
+    const auto target = required_target(chart, time_ms, rules);
+    const bool matched = target < chart.size() && matches(chart[target].frets, held);
+    if (tap && (!streak || !matched || !chart[target].hopo)) {
+        return Pick::neutral;
+    }
+    if (sustain_frets && sustain_tappable_ && target == chart.size() && last_pick_ms_ &&
+        (int64_t(time_ms) - *last_pick_ms_) * 1000 <= rules.release_us) {
+        return Pick::neutral;
     }
 
     end_sustain(time_ms, rules);
+    last_pick_ms_ = time_ms;
+    if (!matched) {
+        ++overstrums;
+        streak = 0;
+        guitar_muted = true;
+        last_miss_ms = time_ms;
+        return Pick::bad;
+    }
+
     while (next < target) {
         miss(chart[next++]);
     }
     const auto &chord = chart[next++];
+    if (played_.empty()) {
+        played_.resize(chart.size());
+    }
+    played_[target] = true;
+
     ++hits;
+    const auto gem_count = fret_count(chord.frets);
+    gem_hits += gem_count;
     ++streak;
     best_streak = std::max(streak, best_streak);
-    score += 50 * fret_count(chord.frets) * multiplier();
-    rock_gain_ += 7.0f;
-    rock = std::min(30000.0f, rock + rock_gain_ * (power_active ? 2.0f : 1.0f));
-    if (chord.phrase_end && chord.power_phrase != broken_phrase_) {
-        power = std::min(100.0f, power + 25.0f);
-    }
-    chain_ = true;
-    last_was_tap_ = tap;
+    score += 50 * gem_count * multiplier();
     guitar_muted = false;
     last_hit_frets = chord.frets;
     last_hit_ms = time_ms;
     last_hit_offset_ms = time_ms - chord.time_ms;
 
-    sustain_start_ms_ = std::max(time_ms, chord.time_ms);
-    sustain_end_ms_ = std::numeric_limits<int>::max();
+    const auto note_start = start_us(chord);
+    sustain_start_us_ = std::max(int64_t(time_ms) * 1000, note_start);
+    sustain_end_us_ = std::numeric_limits<int64_t>::max();
+    last_gem_end_us_ = note_start;
     for (unsigned i = 0; i < chord.ends.size(); ++i) {
         if (chord.frets & (1u << i)) {
-            sustain_end_ms_ = std::min(sustain_end_ms_, chord.ends[i]);
+            const auto note_end = int64_t(chord.ends[i]) * 1000 + chord.end_us_remainders[i];
+            sustain_end_us_ = std::min(sustain_end_us_, note_end);
+            last_gem_end_us_ = std::max(last_gem_end_us_, note_end);
         }
     }
-    if (sustain_end_ms_ - sustain_start_ms_ > rules.sustain_threshold_ms) {
-        sustain_frets = chord.frets;
-    }
+    sustain_end_ms_ = static_cast<int>(sustain_end_us_ / 1000);
+    sustain_length_us_ = sustain_end_us_ - note_start;
+    sustain_frets = chord.frets;
+    sustain_tappable_ = chord.hopo;
     return Pick::hit;
 }
 
-void Round::finish(const Chart &chart, int time_ms, const Rules &rules) {
-    end_sustain(time_ms, rules);
-    misses += static_cast<unsigned>(chart.size() - next);
-    next = chart.size();
+Pick Round::fret_edge(const Chart &chart, int time_ms, uint8_t held, const Rules &rules, bool released) {
+    const auto result = pick(chart, time_ms, held, rules, true);
+    if (result == Pick::neutral && released && last_pick_ms_ &&
+        (int64_t(time_ms) - *last_pick_ms_) * 1000 > rules.release_us) {
+        end_sustain(time_ms, rules);
+    }
+    return result;
+}
+
+void Round::finish(const Chart &chart, int, const Rules &) {
+    // GuitarScene goes straight to results before processing another frame.
+    sustain_frets = 0;
+    while (next < chart.size()) {
+        miss(chart[next++]);
+    }
 }
 
 } // namespace dc

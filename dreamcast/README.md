@@ -1,40 +1,34 @@
-# FoFiX no Dreamcast
+# Frets on Fire 1.3.110 no Dreamcast
 
-Port nativo em desenvolvimento. A referência é o FoFiX de PC no commit `f7e4e403`, com o tema padrão MegaLight V4. A compilação de desenvolvimento inclui **FoF Tutorial**, com as duas trilhas originais de 44,1 kHz, e **Circuito 01**, usada em testes do port.
+Port em desenvolvimento do Frets on Fire clássico da Unreal Voodoo. A referência é o pacote Linux original da versão 1.3.110. A branch `dreamcast-classic` parte do port nativo que implementou a entrada Maple e o streaming Vorbis pela AICA.
 
 ## Teclado
 
-O teclado Maple é a entrada principal. No Flycast, selecione **Keyboard** como dispositivo da porta A.
+No Flycast, selecione **Keyboard** como dispositivo da porta A.
 
 | Ação | Tecla |
 | --- | --- |
-| Navegar | Setas. Enter confirma e Esc volta |
-| Cinco casas, da esquerda para a direita | F1 a F5 |
-| Teclas alternativas para as cinco casas | F6 a F10 |
+| Escolher opção | Setas, Enter ou F1 para confirmar |
+| Cinco casas | F1 a F5 |
 | Palhetar | Enter ou Shift direito |
-| Star Power | Page Down ou Esc durante a partida |
-| Killswitch durante sustains | Page Up |
-| Pausar | Ctrl esquerdo. Escolha Resume para retomar após a contagem de três segundos |
+| Pausar e retomar | Esc |
 
-O menu Settings permite ajustar o atraso de áudio/vídeo e a velocidade da pista. Um atraso positivo faz as notas chegarem mais tarde.
+O jogo começa pelo menu principal. Em **Play Game**, selecione a música e a dificuldade. **Tutorial** abre o tutorial clássico.
 
-## Compilar
+## Compilação
 
-Use KallistiOS 2.2.1 com `libvorbis` e `libogg` do `kos-ports`. O conversor de recursos usa Python 3, Pillow, pycollada e FFmpeg com `libvorbis`. O alvo `cdi` usa `mkdcdisc`.
+Requisitos do port. KallistiOS 2.2.1, libvorbis e libogg em kos-ports, mkdcdisc, Python 3 com Pillow e pycollada, e FFmpeg com o encoder Yamaha ADPCM.
+
+Extraia [FretsOnFire-1.3.110.tar.gz](https://sourceforge.net/projects/fretsonfire/files/fretsonfire/1.3.110/) em um diretório fora do checkout e use a pasta `data` como fonte dos gráficos, do áudio e dos charts.
 
 ```bash
 source /caminho/para/kos/environ.sh
-python3 -m pip install Pillow pycollada
-make -C dreamcast
-make -C dreamcast cdi SONGS_DIR=/caminho/para/songs
+make -C dreamcast clean
+make -C dreamcast -j4 cdi CLASSIC_DATA="/caminho/Frets on Fire-1.3.110/data"
 ```
 
-`SONGS_DIR` é opcional. Cada música usa `notes.mid`, `song.ini` e `song.ogg` ou `guitar.ogg`. Quando os dois Ogg existem, eles devem ter a mesma taxa de amostragem. O jogo lê notas de guitarra MIDI tipo 0 ou 1 com PPQN e usa a posição em amostras da AICA como relógio. Os recursos do tema são convertidos para PowerVR a partir de `data/`.
+Por padrão, a CDI monta os arquivos de `CLASSIC_DATA/songs` como a biblioteca do jogo. `SONGS_DIR` permite indicar outra biblioteca durante desenvolvimento. O tutorial vem do pacote original e é incluído no ROM disk. Ao trocar a fonte de recursos, execute `make clean` antes de recompilar.
 
-## Validação
+A [referência de PC](REFERENCIA_PC.md) identifica a versão, os recursos e as dependências. A [matriz de paridade](PARIDADE.md) registra os resultados por recurso. O [checkpoint de compilação](CHECKPOINT.md) identifica os binários testados.
 
-Os testes cobrem guitarra solo no Flycast com entrada pelo teclado Maple emulado. O tutorial em Expert teve 59 alvos concluídos em teste anterior. A faixa completa Defy The Machine já passa pelo fluxo até o resultado e inicia outra partida. Existem diferenças de regras, entrada sob carga, mixagem interativa e apresentação que impedem a aprovação da paridade.
-
-A [referência de PC](REFERENCIA_PC.md) documenta o MegaLight V4 e as bibliotecas usadas. A [matriz de paridade](PARIDADE.md) registra os recursos, os testes e as diferenças pendentes. O [checkpoint](CHECKPOINT.md) vincula os resultados aos binários testados e descreve a próxima ação.
-
-O código do port segue a GPL, versão 2 ou posterior. As atribuições ficam na [licença](../COPYING), nos [créditos do FoFiX](../CREDITS) e nos [créditos do tema](../data/themes/MegaLight%20V4/CREDITS).
+O código do port segue a GPL, versão 2 ou posterior. O pacote clássico fornece os créditos e as licenças dos recursos usados em `copying.txt`.

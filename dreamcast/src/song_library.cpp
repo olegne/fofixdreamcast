@@ -85,6 +85,9 @@ void load_directory(const std::string &path, std::vector<SongEntry> &songs, unsi
             return;
         }
         read_ini(path + "/song.ini", song);
+        if (path == "/cd/songs/tutorial") {
+            return;  // The original opens Tutorial directly from the main menu.
+        }
         songs.push_back(std::move(song));
         return;
     }
@@ -113,9 +116,8 @@ void load_directory(const std::string &path, std::vector<SongEntry> &songs, unsi
 
 std::vector<SongEntry> song_library() {
     std::vector<SongEntry> songs;
-    songs.push_back({"FoF Tutorial", "Jurgen", "/rd/tutorial/notes.mid", "/rd/tutorial/song.ogg",
+    songs.push_back({"Tutorial", "Jurgen", "/rd/tutorial/notes.mid", "/rd/tutorial/song.ogg",
                      "/rd/tutorial/guitar.ogg", 0, true});
-    songs.push_back({"Circuito 01", "FoFiX Dreamcast", "/rd/demo/notes.mid", "/rd/demo/song.ogg", {}});
     const auto built_in = songs.size();
     load_directory("/cd/songs", songs, 0);
     std::sort(songs.begin() + built_in, songs.end(),

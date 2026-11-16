@@ -1,41 +1,28 @@
-# Referência de PC
+# Referência Linux do Frets on Fire clássico
 
-## Identidade e ponto de partida
-
-- FoFiX `4.0.0 alpha 2` de desenvolvimento no commit `f7e4e403b3324dab45983371d47656c01b6495ce`. A revisão vem do Git e a versão de `fofix/core/Version.py`.
-- MegaLight V4 da árvore `da63939d44bd47129d2dca7c1fe783cba3e82a24` do mesmo commit. O motor escolhe esse diretório como tema padrão se estiver presente. `theme.ini` e `rockmeter.ini` definem a apresentação. [Código de origem](https://github.com/fofix/fofix/tree/f7e4e403b3324dab45983371d47656c01b6495ce)
-- Fork no commit remoto `20113e16757ba82d0bd4b24fc8c1e0e447aff8ad`, árvore `60dd99410f1c0da09603fdd581ae45e03e4cda9f`. O checkout de teclado estava limpo e tinha a mesma árvore. A auditoria usa um worktree de PC separado do checkout anteriormente usado nas capturas.
-- O vídeo anterior foi produzido com Python 3.12, Pygame 2.6.1 e um substituto de `fretwork.mixstream`. No código desse substituto, `seek` muda o relógio estimado e `play` sempre inicia o Ogg decodificado da primeira amostra. Isso invalida o método de iniciar a comparação em um ponto interno da música. O relógio por tamanho do PCM também avança enquanto o dispositivo grava silêncio durante a pausa. Essas capturas ficam como diagnóstico.
-
-## Conferência visual externa
-
-| Material examinado | Versão, modo e proporção | Conclusão para esta referência |
-| --- | --- | --- |
-| Captura de menu com título BlazingGamer’s MegaLight V4 | A barra da janela identifica FoFiX 4.0.0 alpha 1. Menu principal. Imagem de 1282 × 747 com área do jogo de 1280 × 720, 16:9 | Confirma o logotipo, o fundo preto/cinza e o agrupamento de navegação desse tema. As posições em 4:3 serão avaliadas no checkout alvo. [Ficha](https://guitarhero.fandom.com/wiki/Category:Inspired_games) · [Imagem](https://static.wikia.nocookie.net/guitarhero/images/c/c9/FoFiX_v4.0.0%27s_main_menu_%28MegaLight_V4%29.PNG) |
-| Captura de guitarra com guitarra única, letra no topo e tripé de bateria e caixas no palco | FoFiX 4.0.0 alpha 1 e MegaLight V4 atribuídos pela galeria. Guitarra solo durante uma música, com dificuldade e nome da música sem identificação segura na ficha. 1280 × 720, 16:9 | Confirma geometria relativa da pista, trastes circulares, cores de notas e aspecto do fogo. O HUD dessa revisão usa o canto superior direito. O tema no commit escolhido tem o HUD refeito em `rockmeter.ini`, incluindo grupos na base e medidor à esquerda. [Ficha](https://guitarhero.fandom.com/wiki/Category:Inspired_games) · [Imagem](https://static.wikia.nocookie.net/guitarhero/images/a/a7/FoFiX_v4.0.0alpha1%27s_gameplay_%28MegaLight_V4%29.png) |
-| Captura com duas pistas pretas e notas retangulares | MegaLight em estilo Rock Band. Duas pistas e indicação de Jurgen. Galeria associa a linha 3.1; patch e modo exato indeterminados. 801 × 602, aproximadamente 4:3 | Referência histórica do MegaLight, com recursos e geometria próprios. [Ficha](https://gamia-archive.fandom.com/wiki/Frets_on_Fire) · [Imagem](https://static.wikia.nocookie.net/guitarhero/images/1/1a/Fofixmegalight.png) |
-| Menu com tigre, logotipo Rock Band 2 e destaque amarelo em Solo | Rock Band 2 declarado pelo autor, FoFiX 3.120 alpha na barra da janela. Menu principal, 800 × 605 incluindo moldura | Tema separado. A galeria de ModDB consultada abre esta imagem por padrão. [Ficha](https://www.moddb.com/games/frets-on-fire-x/images) · [Imagem](https://media.moddb.com/images/games/1/13/12251/prev2.jpg) |
-
-MegaLight GH3 tem seu próprio diretório e configuração. O anúncio de 4.0.0 alpha 1 identifica a chegada do MegaLight V4 e do sistema de rockmeter customizável. O histórico do arquivo registra mudanças posteriores, incluindo `65368475` (2011-08-01) para a animação do medidor. A documentação Quickstart lista as variantes separadamente e descreve um padrão diferente da seleção feita pelo código de `f7e4e403`. Os PNGs e as coordenadas do checkout escolhido valem para os testes. [Anúncio](https://www.indiedb.com/games/frets-on-fire-x/news/vesion-400-alpha-released-27-november-2010) · [Temas](https://fofix.readthedocs.io/en/latest/users/themes.html)
-
-## Ambiente de execução
-
-- Perfil limpo fora dos dados de usuário anteriores. Exibição de 640 × 480 e 4:3, limite de 60 quadros por segundo, `defaultneck`, `stage_mode=1` e velocidade 100 na pista. Para o MegaLight V4 com essa opção, a câmera usa origem `(0, 2.9, -2.9)` e alvo `(0, 0, 3.7)`.
-- Guitarra solo em Quickplay, Expert, perfil `defaultg.ini`. Atraso A/V zero. F1 a F5 e F6 a F10 nas casas, Enter e Shift direito na palhetada, setas na navegação, Ctrl esquerdo para pausa, Page Down e Esc para Star Power durante a partida e Page Up para Killswitch.
-- Opções de regras efetivas em `game` com `star_scoring=3`, `sustain_muting=1`, `hopo_after_chord=1`, `song_hopo_freq=1` e `resume_countdown=1`. Em `coffee`, `hopo_frequency=2`. A partida completa permite derrota. As sondagens isoladas de câmera e do tutorial usaram `failingEnabled=False`.
-- Áudio nativo em 44.100 Hz, estéreo, PCM 16-bit e buffer de 2.048 amostras. `songvol=0.8`, `guitarvol=1.0`, `miss_volume=0.2`, `single_track_miss_volume=0.9`, `SFX_volume=0.7`, `screwupvol=0.25`, `whammy_effect=0` e `kill_volume=0.0`.
-- CPython 3.7.17. Pygame 1.9.6 e Fretwork 0.5.0 compilados com a mesma biblioteca SDL_mixer 1.2.12. A interface SDL 1.2 é provida por sdl12-compat 1.2.68 sobre SDL2 2.32.4. Vinculação de Fretwork com libVorbisfile 1.3.7 e SoundTouch 2.4.0. Outras dependências incluem NumPy 1.16.6, Pillow 6.2.2, PyOpenGL e seu acelerador 3.1.5, pycollada 0.7.1, PyAudio 0.2.11, pypitch 1.3 e videoplayer 1.0. Partir dos pins de [requirements.txt](../requirements.txt). Com GCC 14, os módulos antigos precisaram relaxar os avisos de conversão de ponteiros. A extensão opcional `pygame.scrap` ficou fora da compilação.
-- Execução em Linux, com `SDL_VIDEODRIVER=offscreen`, `PYOPENGL_PLATFORM=egl` e OpenGL 4.5 Compatibility Profile Mesa 25.0.7, llvmpipe. O driver SDL de disco gravou o PCM do mixer. A automação enviou eventos de teclado ao SDL e leu a imagem de 640 × 480 do OpenGL. Os testes de desempenho de PC refletem essa execução sem monitor e com renderização por software.
-- Tutorial `data/tutorials/jurgenfof` da árvore `1b202a50efd3579a62b12c9009d600fb7d9748ae`. Para músicas completas, usar `Defy The Machine`, `Bang Bang, Mystery Man` e `This Week I've Been Mostly Playing Guitar` do Frets on Fire 1.3.110. O checkout tem os tutoriais. As três músicas vieram do pacote oficial de Linux, SHA-256 `c8cca75a897a8c4cadac06f92fd85b417ac41fc19fc719e89ddcd91a3c29f9da`. Usar os arquivos localmente para teste. [Pacote oficial](https://sourceforge.net/projects/fretsonfire/files/fretsonfire/1.3.110/)
-
-## Resultados da auditoria
-
-| Observação no PC | Evidência e condição testada |
+| Item | Configuração |
 | --- | --- |
-| `noise3d.dds` carrega como texto e desativa efeitos em Python 3 | Arquivo presente. `Shader.loadTex3D` dispara `UnicodeDecodeError` antes de compilar. Restringir a abertura binária a esse arquivo entrega os mesmos bytes que o Python 2.7.18 entregava em Linux, SHA-256 `b90f5885166878ead725a922164da447bd02182262b331d27a38237409c8975c`. O OpenGL compilou `stage`, `sololight`, `tail`, `tail2`, `notes`, `neck` e `cd` com essa adaptação. Alguns nomes de configuração de shaders continuam gerando avisos. A comparação de efeitos se refere a essa execução Mesa. |
-| MIDI nomeado não é reconhecido pela execução Python 3 sem adaptação | Fretwork entrega o nome como `bytes` e os leitores comparam com strings. O tutorial não carregou as gemas Expert esperadas. Decodificar nomes em Latin-1 na entrada de `MidiReader.sequence_name` e `MidiPartsDiffReader.sequence_name` restaura as comparações originais sem editar o MIDI. No chart Expert de Defy, os eventos e o replay resultante foram idênticos com as duas configurações do leitor. Validar também outros tipos de metadados MIDI e parts. |
-| Fontes e gráfico de pausa do MegaLight V4 | As sondagens por fontes específicas usam `fonts/default.ttf` conforme o fallback de `Data.py`. Os menus de pausa e falha usam texto quando faltam as imagens opcionais de submenu. A seleção de músicas usa o carrossel do tema e a dificuldade usa um diálogo sobre ele. O carrossel, o perfil e o painel de pausa diferem da interface atual do Dreamcast. |
-| Mixer de Fretwork voltou a produzir áudio e tempo a partir dos Ogg | Teste independente com seek real para 81,5 s, pausa, retomada e alteração por stem. Os ganhos medidos do acompanhamento ficaram em 0,797 e os da guitarra em 0,987 a 1,000, 0,195 e 0,000 para os comandos normal, redução por erro e mute, respectivamente. A fonte da captura é o mixer C. |
-| Um HOPO do tutorial pode pontuar duas vezes no PC | Com Fretwork nativo e seleção de track corrigida, F3 acertou a nota de 113.437,5 ms. Na mesma iteração a palhetada Enter encontrou o mesmo objeto em `matchingNotes`, já com `played=True` e `hopod=True`. `startPick3` creditou esse objeto novamente. Em teste de controle com Enter no quadro seguinte, a cache já estava vazia e houve um acerto. A sequência de estímulos acionou um defeito do motor. O arquivo MIDI contém um alvo naquela posição. |
+| Jogo | Frets on Fire 1.3.110, Unreal Voodoo, pacote Linux oficial de 2008 |
+| Arquivo | `FretsOnFire-1.3.110.tar.gz` |
+| SHA-256 | `c8cca75a897a8c4cadac06f92fd85b417ac41fc19fc719e89ddcd91a3c29f9da` |
+| Git legado relacionado | `fretsonfire/FretsOnFire@1017399a4b6fa659a90e2806e2d2f729e5cdc07d` |
+| Recursos | Visual e palco padrão do pacote. Resolução 640 × 480, 4:3 |
+| Áudio | 44,1 kHz estéreo, 16 bits. Ganhos padrão de acompanhamento e guitarra iguais a 1,0 |
+| Teclado e tempo | F1 a F5, Enter/Shift direito, setas, Esc. Atraso A/V padrão de 100 ms |
+| Referência de partida | Defy The Machine, Amazing, arquivos `notes.mid`, `song.ogg` e `guitar.ogg` do pacote |
 
-O perfil de reprodução manteve o cache de metadados desativado por opção de configuração. O código do jogo, os PNGs e as músicas vieram dos checkouts e arquivos identificados. As duas adaptações de compatibilidade foram aplicadas no processo de teste e os logs registram quando estavam ativas. A aprovação de efeitos em outras GPUs, de áudio em todos os modos e do fluxo completo segue na [matriz de paridade](PARIDADE.md).
+O arquivo anexado coincide com o pacote oficial. Seu código e recursos são a referência exata. O Git legado também se identifica como 1.3.110 e contém ajustes em arquivos como `src/Audio.py`, `src/GameEngine.py` e `src/Dialogs.py`. [Lançamento oficial](https://sourceforge.net/projects/fretsonfire/files/fretsonfire/1.3.110/) · [Git legado](https://github.com/fretsonfire/FretsOnFire/tree/1017399a4b6fa659a90e2806e2d2f729e5cdc07d)
+
+## Execução observada
+
+CPython 2.7.18, Pygame 1.9.6, NumPy 1.16.6, Pillow 6.2.2, PyOpenGL 3.1.5, SDL_mixer 1.2.12 e libvorbisfile. Pygame usa a interface SDL 1.2 de sdl12-compat 1.2.68. OpenGL em Mesa 25.0.7 com perfil Compatibilidade 4.5. A execução usa um perfil limpo, sem compartilhamento de recordes pela internet.
+
+A camada de compatibilidade expõe os nomes antigos `Image`, `PngImagePlugin`, `tostring` e `fromstring` através das funções correspondentes do Pillow. A versão oficial usa seu caminho PNG para os SVGs. Os arquivos do jogo foram preservados na cópia original. O driver de disco do SDL gravou a saída real do mixer.
+
+Em uma medição isolada, a saída capturada ao reproduzir Defy no mixer do jogo obteve correlação acima de 0,999999969 e erro RMS de até 1,15 níveis PCM em quatro janelas de meio segundo. As janelas incluem os dois stems em 1,0, a guitarra silenciada e a volta de uma pausa. O relógio `mixer.music.get_pos()` apresenta um salto transitório ao retomar, antes do próximo callback. O PCM confirma a retomada no cursor original. O replay aguarda a estabilização desse relógio na retomada.
+
+## Aparência histórica
+
+As sete capturas oficiais de 640 × 480 mostram o logotipo em chamas, os cassetes, as dificuldades, os refletores, os trastes, o placar, o editor e o resultado. A quarta imagem, de uma partida de guitarra com palco verde, está preservada desde 2007. A revisão interna dessas imagens é desconhecida. [Galeria oficial](https://fretsonfire.sourceforge.net/screenshots/) · [Arquivo da captura de jogo](https://commons.wikimedia.org/wiki/File:Fretsonfire4.png)
+
+O vídeo oficial de 720 × 576 contém o menu em 00:00, a seleção em 01:16, guitarra em 01:40 e 01:52 e o resultado em 02:50. As cenas jogadas usam fundo vinho liso e a compilação permanece indeterminada. As capturas da execução Linux acima definem os elementos da versão escolhida para o port. [Vídeo oficial arquivado](https://commons.wikimedia.org/wiki/File:Fretsonfire-demo.ogv)

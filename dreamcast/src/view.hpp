@@ -43,11 +43,13 @@ public:
 
 private:
     enum TextureId {
-        main_bg, main_text, version, options_bg, stage, neck, power_neck, strings, bars, measure, beat,
-        half, frets, notes, flame, glow, tail, tail_end, tail_held, tail_held_end,
-        hud, meter, star, star_off, pause_image, rock, fail,
-        font, score_font, tutorial_pose, tutorial_keyboard, tutorial_escape, gem_a, gem_b, gem_c,
-        gem_d, gem_e, power_a, power_b, power_c, power_d, power_e, texture_count
+        keyboard, menu_pose, logo, cassette_bg, editor_bg, cassette_front, cassette_above, cassette_below,
+        label_bangbang, label_defy, label_twibmpg, stage,
+        stage_lights_left, stage_lights_right, stage_drums, stage_bass, stage_speakers,
+        stage_cones, stage_crowd_left, stage_crowd_right, stage_beam,
+        neck, strings, bars, tail, glow, gem, tap_gem, ball_on, ball_off,
+        star, star_off, mult2, mult3, mult4, font, title_font,
+        tutorial_pose, tutorial_keyboard, tutorial_escape, texture_count
     };
 
     struct Texture {
@@ -56,7 +58,7 @@ private:
     };
 
     struct MeshVertex {
-        float x, y, z, u, v;
+        float x, y, z, shade;
     };
 
     struct Face {
@@ -72,23 +74,30 @@ private:
     void sprite(TextureId id, float left, float top, float width, float height, float depth,
                 float u0 = 0, float v0 = 0, float u1 = 1, float v1 = 1,
                 uint32_t color = 0xffffffff);
+    void rotated_sprite(TextureId id, float x, float y, float w, float h, float angle,
+                        float depth, uint32_t color = 0xffffffff);
     void board_quad(TextureId id, float x0, float x1, float y, float z0, float z1,
                     float u0, float v0, float u1, float v1,
                     uint32_t back = 0xffffffff, uint32_t front = 0xffffffff);
     void text(float x, float y, const char *line, float size, uint32_t color,
-              bool centered = false, bool numeric = false);
-    void draw_tail(float x, float start, float end, float scroll, uint32_t color, bool held);
+              bool centered = false, bool title = false);
+    void text_line(float x, float y, const char *line, float size, uint32_t color, bool title);
+    void mesh(const Mesh &shape, float x, float y, float z, uint32_t color);
+    void draw_tail_wave(unsigned lane, float end, int time);
     void world(const Frame &frame, const SongChart &song, const Round &round,
                const Chart &chart, float period_ms);
-    void draw_note_mesh(const Chord &chord, unsigned lane, float z);
-    void draw_rockmeter(const Frame &frame, const Round &round, const Chart &chart,
-                        const Rules &rules);
-    void menu(const Frame &frame, const Chart &chart, const Round &round,
+    void stage_decoration(float beat_phase);
+    void stage_lights(const Frame &frame, const Round &round);
+    void draw_stats(const Frame &frame, const Round &round, const Rules &rules);
+    void menu_backdrop(const Frame &frame);
+    void setlist(const Frame &frame, const std::vector<SongEntry> &library);
+    void menu(const Frame &frame, const Round &round,
               const std::vector<SongEntry> &library);
 
     std::array<Texture, texture_count> textures_{};
     std::array<std::array<uint8_t, 95>, 2> widths_{};
-    Mesh regular_note_, hopo_note_;
+    pvr_poly_hdr_t mesh_header_{}, overlay_header_{}, glow_header_{};
+    Mesh regular_note_, tap_marker_, fret_key_;
 };
 
 } // namespace dc

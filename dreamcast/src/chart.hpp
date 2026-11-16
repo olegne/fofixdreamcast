@@ -4,6 +4,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -14,8 +15,9 @@ struct Chord {
     std::array<int, 5> ends{};
     uint8_t frets = 0;
     bool hopo = false;
-    int power_phrase = -1;
-    bool phrase_end = false;
+    // The renderer uses milliseconds. Judgement and sustain scoring retain fractions.
+    uint16_t start_us_remainder = 0;
+    std::array<uint16_t, 5> end_us_remainders{};
 };
 
 using Chart = std::vector<Chord>;
@@ -31,10 +33,11 @@ struct TempoPoint {
 };
 
 struct SongChart {
-    // FoFiX difficulty numbers: Expert, Hard, Medium, Easy.
+    // Frets on Fire difficulty numbers: Amazing, Medium, Easy, Supaeasy.
     std::array<Chart, 4> guitar;
     std::vector<TempoPoint> tempos;
     std::vector<Beat> beats;
+    unsigned initial_us_per_beat = 500000;
     unsigned us_per_beat(int time_ms) const;
 };
 
@@ -45,56 +48,63 @@ inline unsigned fret_count(uint8_t mask) {
 }
 
 struct Rules {
-    explicit Rules(float bpm = 120);
+    explicit Rules(float bpm = 120, int delay_ms = 0);
 
     float early_ms;
     float late_ms;
     float release_ms;
     float sustain_threshold_ms;
+    int window_us;
+    int release_us;
+    int sustain_threshold_us;
+    int delay_ms;
 };
 
 enum class Pick { neutral, hit, bad };
 
 class Round {
 public:
-    void advance(const Chart &chart, int time_ms, uint8_t held, const Rules &rules);
+    Pick advance(const Chart &chart, int time_ms, uint8_t held, const Rules &rules);
     Pick pick(const Chart &chart, int time_ms, uint8_t held, const Rules &rules, bool tap);
-    bool activate_power();
+    Pick fret_edge(const Chart &chart, int time_ms, uint8_t held, const Rules &rules, bool released);
     void finish(const Chart &chart, int time_ms, const Rules &rules);
     unsigned multiplier() const;
     unsigned display_score(int time_ms, const Rules &rules) const;
-    unsigned rating(unsigned gems, size_t targets, int time_ms, const Rules &rules) const;
+    unsigned rating(unsigned gems) const;
     int sustained_until() const { return sustain_end_ms_; }
+    bool was_hit(size_t target) const { return target < played_.size() && played_[target]; }
 
     size_t next = 0;
     unsigned score = 0;
     unsigned hits = 0;
     unsigned misses = 0;
+    unsigned gem_hits = 0;
+    unsigned gem_misses = 0;
     unsigned overstrums = 0;
     unsigned streak = 0;
     unsigned best_streak = 0;
-    float rock = 15000.0f;
-    float power = 0.0f;
-    bool power_active = false;
     bool guitar_muted = false;
     uint8_t sustain_frets = 0;
     uint8_t last_hit_frets = 0;
     int last_hit_ms = -1000;
     int last_hit_offset_ms = 0;
+    int last_miss_ms = -1000;
 
 private:
     void miss(const Chord &chord);
     void end_sustain(int time_ms, const Rules &rules);
     unsigned sustain_points(int time_ms, const Rules &rules) const;
+    size_t required_target(const Chart &chart, int time_ms, const Rules &rules) const;
 
-    float rock_gain_ = 15.0f;
-    float rock_loss_ = 400.0f;
-    int sustain_start_ms_ = 0;
+    int64_t sustain_start_us_ = 0;
+    int64_t sustain_length_us_ = 0;
+    int64_t sustain_end_us_ = 0;
+    int64_t last_gem_end_us_ = 0;
     int sustain_end_ms_ = 0;
-    bool chain_ = false;
-    bool last_was_tap_ = false;
-    int broken_phrase_ = -1;
-    int previous_time_ms_ = -1;
+    std::optional<int> last_pick_ms_;
+    std::optional<int> pending_pick_ms_;
+    bool sustain_tappable_ = false;
+    std::vector<bool> played_;
 };
 
 } // namespace dc

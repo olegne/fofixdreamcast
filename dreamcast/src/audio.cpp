@@ -14,7 +14,7 @@
 namespace dc {
 namespace {
 
-constexpr unsigned backing_volume = 204; // FoFiX's 80% background volume.
+constexpr unsigned backing_volume = 255; // Frets on Fire defaults songvol to 1.0.
 
 struct AicaCommand {
     alignas(32) uint32_t packet[AICA_CMDSTR_CHANNEL_SIZE]{};
@@ -46,7 +46,7 @@ bool Audio::start(const char *backing, const char *guitar) {
         stop();
         return false;
     }
-    length_frames_ = std::max(stems_[0].frames, stems_[1].frames);
+    length_frames_ = stems_[0].frames;
     for (auto &stem : stems_) {
         for (unsigned block = 0; stem.open && block < blocks; ++block) {
             if (!fill(stem, block)) {
@@ -56,7 +56,7 @@ bool Audio::start(const char *backing, const char *guitar) {
         }
     }
     begin_stream(0);
-    std::printf("FoFiXDC: audio %u Hz, backing=%u ch guitar=%u ch samples=%u\n",
+    std::printf("FoFDC: audio %u Hz, backing=%u ch guitar=%u ch samples=%u\n",
                 rate_, stems_[0].channels, stems_[1].channels, length_frames_);
     return true;
 }
