@@ -10,12 +10,16 @@ namespace dc {
 class Audio {
 public:
     ~Audio() { stop(); }
-    bool start(const char *path);
+    bool start(const char *backing, const char *guitar = nullptr);
     void poll();
+    bool pause();
+    bool resume();
     void stop();
+    void guitar_gain(float volume);
 
     int position_ms() const;
     bool playing() const { return active_; }
+    bool has_guitar() const { return stems_[1].open; }
     const char *error() const { return error_; }
 
 private:
@@ -23,24 +27,35 @@ private:
     static constexpr unsigned blocks = 8;
     static constexpr unsigned ring_frames = block_frames * blocks;
 
-    bool fill(unsigned block);
+    struct Stem {
+        OggVorbis_File decoder{};
+        int channel[2] = {-1, -1};
+        uint32_t address[2] = {};
+        unsigned channels = 0;
+        unsigned frames = 0;
+        unsigned decoded = 0;
+        bool open = false;
+    };
+
+    bool open(Stem &stem, const char *path);
+    bool fill(Stem &stem, unsigned block);
+    bool prepare(unsigned position);
     void queue_start();
+    bool halt();
     void fail(const char *message);
 
-    OggVorbis_File decoder_{};
+    Stem stems_[2];
     alignas(32) int16_t decoded_[block_frames * 2];
     alignas(32) int16_t split_[2][block_frames];
-    int channel_[2] = {-1, -1};
-    uint32_t address_[2] = {};
-    bool opened_ = false;
     bool active_ = false;
+    bool paused_ = false;
     bool clock_ready_ = false;
-    unsigned channels_ = 0;
     unsigned rate_ = 0;
     unsigned length_frames_ = 0;
-    unsigned decoded_frames_ = 0;
     unsigned played_frames_ = 0;
+    unsigned ring_origin_ = 0;
     unsigned last_cursor_ = 0;
+    unsigned guitar_volume_ = 255;
     uint64_t last_poll_us_ = 0;
     const char *error_ = nullptr;
 };

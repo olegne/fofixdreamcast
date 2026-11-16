@@ -12,116 +12,168 @@
 #include <kos/thread.h>
 
 namespace dc {
+namespace {
 
-bool Audio::start(const char *path) {
+struct AicaCommand {
+    alignas(32) uint32_t packet[AICA_CMDSTR_CHANNEL_SIZE]{};
+
+    aica_cmd_t *command() { return reinterpret_cast<aica_cmd_t *>(packet); }
+    aica_channel_t *voice() { return reinterpret_cast<aica_channel_t *>(command()->cmd_data); }
+
+    void send(uint64_t id, uint32_t flags) {
+        command()->cmd = AICA_CMD_CHAN;
+        command()->size = AICA_CMDSTR_CHANNEL_SIZE;
+        command()->cmd_id = id;
+        voice()->cmd = flags;
+        snd_sh4_to_aica(packet, command()->size);
+    }
+};
+
+} // namespace
+
+bool Audio::start(const char *backing, const char *guitar) {
     stop();
     error_ = nullptr;
-    played_frames_ = decoded_frames_ = last_cursor_ = 0;
-    clock_ready_ = false;
+    rate_ = played_frames_ = 0;
+    guitar_volume_ = 255;
     if (snd_init() < 0) {
-        fail("FALHA AO INICIAR AICA");
+        fail("AICA initialization failed.");
         return false;
     }
-
-    auto *file = std::fopen(path, "rb");
-    if (!file) {
-        fail("NAO FOI POSSIVEL ABRIR SONG.OGG");
+    if (!open(stems_[0], backing) || (guitar && !open(stems_[1], guitar))) {
+        stop();
         return false;
     }
-    if (ov_open(file, &decoder_, nullptr, 0) != 0) {
-        std::fclose(file);
-        fail("ARQUIVO OGG VORBIS INVALIDO");
+    length_frames_ = std::max(stems_[0].frames, stems_[1].frames);
+    if (!prepare(0)) {
         return false;
     }
-    opened_ = true;
-    const auto *info = ov_info(&decoder_, 0);
-    const auto length = ov_pcm_total(&decoder_, 0);
-    if (ov_streams(&decoder_) != 1 || !info || info->channels < 1 || info->channels > 2 ||
-        info->rate < 8000 || info->rate > 48000 || length <= 0 ||
-        length > info->rate * 60 * 60) {
-        fail("USE OGG VORBIS MONO OU ESTEREO");
-        return false;
-    }
-    channels_ = static_cast<unsigned>(info->channels);
-    rate_ = static_cast<unsigned>(info->rate);
-    length_frames_ = static_cast<unsigned>(length);
-    for (unsigned i = 0; i < channels_; ++i) {
-        channel_[i] = snd_sfx_chn_alloc();
-        address_[i] = snd_mem_malloc(ring_frames * sizeof(int16_t));
-        if (channel_[i] < 0 || !address_[i]) {
-            fail("SEM MEMORIA DE AUDIO AICA");
-            return false;
-        }
-    }
-    for (unsigned block = 0; block < blocks; ++block) {
-        if (!fill(block)) {
-            fail("ERRO DURANTE A LEITURA DO OGG");
-            return false;
-        }
-    }
-
-    queue_start();
-    active_ = true;
-    last_poll_us_ = timer_us_gettime64();
-    std::printf("FoFiXDC: audio %u Hz, %u channel(s), %u frames\n",
-                rate_, channels_, length_frames_);
+    std::printf("FoFiXDC: audio %u Hz, backing=%u ch guitar=%u ch samples=%u\n",
+                rate_, stems_[0].channels, stems_[1].channels, length_frames_);
     return true;
 }
 
-bool Audio::fill(unsigned block) {
-    const auto frames = std::min(block_frames, length_frames_ - decoded_frames_);
-    const unsigned bytes = frames * channels_ * sizeof(int16_t);
+bool Audio::open(Stem &stem, const char *path) {
+    auto *file = std::fopen(path, "rb");
+    if (!file) {
+        error_ = "Could not open an audio track.";
+        return false;
+    }
+    if (ov_open(file, &stem.decoder, nullptr, 0) != 0) {
+        std::fclose(file);
+        error_ = "Invalid Ogg Vorbis audio track.";
+        return false;
+    }
+    stem.open = true;
+    const auto *info = ov_info(&stem.decoder, 0);
+    const auto frames = ov_pcm_total(&stem.decoder, 0);
+    if (ov_streams(&stem.decoder) != 1 || !info || info->channels < 1 || info->channels > 2 ||
+        info->rate < 8000 || info->rate > 48000 || frames <= 0 || frames > info->rate * 3600) {
+        error_ = "Unsupported Ogg Vorbis track.";
+        return false;
+    }
+    const auto rate = static_cast<unsigned>(info->rate);
+    if (rate_ && rate_ != rate) {
+        error_ = "The backing and guitar tracks must share a sample rate.";
+        return false;
+    }
+    rate_ = rate;
+    stem.channels = static_cast<unsigned>(info->channels);
+    stem.frames = static_cast<unsigned>(frames);
+    stem.decoded = 0;
+    for (unsigned i = 0; i < stem.channels; ++i) {
+        stem.channel[i] = snd_sfx_chn_alloc();
+        stem.address[i] = snd_mem_malloc(ring_frames * sizeof(int16_t));
+        if (stem.channel[i] < 0 || !stem.address[i]) {
+            error_ = "Not enough AICA memory.";
+            return false;
+        }
+    }
+    return true;
+}
+
+bool Audio::fill(Stem &stem, unsigned block) {
+    const auto frames = std::min(block_frames, stem.frames - stem.decoded);
+    const unsigned bytes = frames * stem.channels * sizeof(int16_t);
     auto *pcm = reinterpret_cast<char *>(decoded_);
     unsigned offset = 0;
     while (offset < bytes) {
         int section = 0;
-        const auto got = ov_read(&decoder_, pcm + offset, bytes - offset, 0, 2, 1, &section);
+        const auto got = ov_read(&stem.decoder, pcm + offset, bytes - offset, 0, 2, 1, &section);
         if (got <= 0) {
             return false;
         }
         offset += static_cast<unsigned>(got);
     }
-    decoded_frames_ += frames;
+    stem.decoded += frames;
     const auto block_bytes = block_frames * sizeof(int16_t);
-    std::memset(pcm + offset, 0, block_bytes * channels_ - offset);
-    if (channels_ == 1) {
-        spu_memload_sq(address_[0] + block * block_bytes, decoded_, block_bytes);
+    std::memset(pcm + offset, 0, block_bytes * stem.channels - offset);
+    if (stem.channels == 1) {
+        spu_memload_sq(stem.address[0] + block * block_bytes, decoded_, block_bytes);
     } else {
-        snd_pcm16_split(reinterpret_cast<uint32_t *>(decoded_),
-                        reinterpret_cast<uint32_t *>(split_[0]),
-                        reinterpret_cast<uint32_t *>(split_[1]), block_bytes * 2);
-        for (unsigned i = 0; i < channels_; ++i) {
-            spu_memload_sq(address_[i] + block * block_bytes, split_[i], block_bytes);
+        for (unsigned i = 0; i < block_frames; ++i) {
+            split_[0][i] = decoded_[2 * i];
+            split_[1][i] = decoded_[2 * i + 1];
+        }
+        for (unsigned i = 0; i < stem.channels; ++i) {
+            spu_memload_sq(stem.address[i] + block * block_bytes, split_[i], block_bytes);
         }
     }
     return true;
 }
 
+bool Audio::prepare(unsigned position) {
+    for (auto &stem : stems_) {
+        if (!stem.open) {
+            continue;
+        }
+        const auto offset = std::min(position, stem.frames);
+        if (stem.decoded != offset) {
+            stem.decoded = offset;
+            if (stem.decoded < stem.frames && ov_pcm_seek(&stem.decoder, stem.decoded) != 0) {
+                fail("Could not seek in the audio track.");
+                return false;
+            }
+        }
+        for (unsigned block = 0; block < blocks; ++block) {
+            if (!fill(stem, block)) {
+                fail("Error decoding the audio track.");
+                return false;
+            }
+        }
+    }
+
+    ring_origin_ = played_frames_ = position;
+    last_cursor_ = 0;
+    clock_ready_ = false;
+    queue_start();
+    active_ = true;
+    paused_ = false;
+    last_poll_us_ = timer_us_gettime64();
+    return true;
+}
+
 void Audio::queue_start() {
-    AICA_CMDSTR_CHANNEL(packet, command, voice);
-    std::memset(packet, 0, sizeof(packet));
-    command->cmd = AICA_CMD_CHAN;
-    command->size = AICA_CMDSTR_CHANNEL_SIZE;
-    voice->cmd = AICA_CH_CMD_START | AICA_CH_START_DELAY;
+    AicaCommand cmd;
+    auto *voice = cmd.voice();
     voice->type = AICA_SM_16BIT;
     voice->length = ring_frames;
     voice->loop = 1;
     voice->loopend = ring_frames;
     voice->freq = rate_;
-    voice->vol = 255;
     uint64_t mask = 0;
 
     snd_sh4_to_aica_stop();
-    for (unsigned i = 0; i < channels_; ++i) {
-        command->cmd_id = channel_[i];
-        voice->base = address_[i];
-        voice->pan = channels_ == 1 ? 128 : (i == 0 ? 0 : 255);
-        snd_sh4_to_aica(packet, command->size);
-        mask |= uint64_t{1} << channel_[i];
+    for (const auto &stem : stems_) {
+        for (unsigned i = 0; i < stem.channels; ++i) {
+            voice->base = stem.address[i];
+            voice->pan = stem.channels == 1 ? 128 : (i == 0 ? 0 : 255);
+            voice->vol = &stem == &stems_[1] || !has_guitar() ? guitar_volume_ : 255;
+            cmd.send(stem.channel[i], AICA_CH_CMD_START | AICA_CH_START_DELAY);
+            mask |= uint64_t{1} << stem.channel[i];
+        }
     }
-    command->cmd_id = mask;
-    voice->cmd = AICA_CH_CMD_START | AICA_CH_START_SYNC;
-    snd_sh4_to_aica(packet, command->size);
+    cmd.send(mask, AICA_CH_CMD_START | AICA_CH_START_SYNC);
     snd_sh4_to_aica_start();
 }
 
@@ -132,24 +184,25 @@ void Audio::poll() {
     const auto now = timer_us_gettime64();
     const auto safe_poll_interval = uint64_t(ring_frames - block_frames) * 1000000 / rate_;
     if (now - last_poll_us_ >= safe_poll_interval) {
-        fail("AICA PERDEU A SINCRONIA");
+        fail("The audio buffer lost synchronization.");
         return;
     }
+    const auto primary_channel = stems_[0].channel[0];
     if (!clock_ready_) {
-        if (!snd_is_playing(channel_[0])) {
+        if (!snd_is_playing(primary_channel)) {
             return;
         }
         clock_ready_ = true;
     }
 
-    // Only a consumed block is rewritten. The cursor is measured on the playing AICA voice.
-    const auto cursor = unsigned(snd_get_pos(channel_[0])) & (ring_frames - 1);
+    // The ARM publishes the actual playback position of the backing voice.
+    const auto cursor = unsigned(snd_get_pos(primary_channel)) & (ring_frames - 1);
     const auto advance = (cursor - last_cursor_) & (ring_frames - 1);
     if (advance >= ring_frames - block_frames) {
-        fail("CURSOR DE AUDIO INVALIDO");
+        fail("Invalid AICA playback position.");
         return;
     }
-    const auto old_block = played_frames_ / block_frames;
+    const auto old_block = (played_frames_ - ring_origin_) / block_frames;
     played_frames_ += advance;
     last_cursor_ = cursor;
     last_poll_us_ = now;
@@ -158,10 +211,74 @@ void Audio::poll() {
         stop();
         return;
     }
-    for (auto block = old_block; block < played_frames_ / block_frames; ++block) {
-        if (!fill(block % blocks)) {
-            fail("ERRO DURANTE A LEITURA DO OGG");
-            return;
+    for (auto block = old_block; block < (played_frames_ - ring_origin_) / block_frames; ++block) {
+        for (auto &stem : stems_) {
+            if (stem.open && !fill(stem, block % blocks)) {
+                fail("Error decoding the audio track.");
+                return;
+            }
+        }
+    }
+}
+
+bool Audio::halt() {
+    if (!active_) {
+        return true;
+    }
+    AicaCommand cmd;
+    for (const auto &stem : stems_) {
+        for (unsigned i = 0; i < stem.channels; ++i) {
+            cmd.send(stem.channel[i], AICA_CH_CMD_STOP);
+        }
+    }
+    active_ = false;
+    const auto deadline = timer_us_gettime64() + 50000;
+    for (const auto &stem : stems_) {
+        for (unsigned i = 0; i < stem.channels; ++i) {
+            while (snd_is_playing(stem.channel[i])) {
+                if (timer_us_gettime64() >= deadline) {
+                    snd_shutdown();
+                    for (auto &invalid : stems_) {
+                        invalid.channel[0] = invalid.channel[1] = -1;
+                        invalid.address[0] = invalid.address[1] = 0;
+                    }
+                    return false;
+                }
+                thd_sleep(1);
+            }
+        }
+    }
+    return true;
+}
+
+bool Audio::pause() {
+    if (!active_) {
+        return false;
+    }
+    if (!halt()) {
+        fail("The AICA did not stop.");
+        return false;
+    }
+    paused_ = true;
+    return true;
+}
+
+bool Audio::resume() {
+    return paused_ && prepare(played_frames_);
+}
+
+void Audio::guitar_gain(float volume) {
+    const unsigned value = std::clamp(static_cast<int>(volume * 255.0f + 0.5f), 0, 255);
+    if (value == guitar_volume_) {
+        return;
+    }
+    guitar_volume_ = value;
+    if (active_) {
+        const auto &voice = stems_[has_guitar() ? 1 : 0];
+        AicaCommand cmd;
+        cmd.voice()->vol = guitar_volume_;
+        for (unsigned i = 0; i < voice.channels; ++i) {
+            cmd.send(voice.channel[i], AICA_CH_CMD_UPDATE | AICA_CH_UPDATE_SET_VOL);
         }
     }
 }
@@ -171,44 +288,24 @@ int Audio::position_ms() const {
 }
 
 void Audio::stop() {
-    if (active_) {
-        AICA_CMDSTR_CHANNEL(packet, command, voice);
-        std::memset(packet, 0, sizeof(packet));
-        command->cmd = AICA_CMD_CHAN;
-        command->size = AICA_CMDSTR_CHANNEL_SIZE;
-        voice->cmd = AICA_CH_CMD_STOP;
-        for (unsigned i = 0; i < channels_; ++i) {
-            command->cmd_id = channel_[i];
-            snd_sh4_to_aica(packet, command->size);
-        }
-        // Wait for the ARM to apply the stops before returning SPU buffers to the allocator.
-        for (unsigned i = 0; i < channels_; ++i) {
-            const auto deadline = timer_us_gettime64() + 50000;
-            while (snd_is_playing(channel_[i]) && timer_us_gettime64() < deadline) {
-                thd_sleep(1);
+    halt();
+    paused_ = false;
+    for (auto &stem : stems_) {
+        for (unsigned i = 0; i < 2; ++i) {
+            if (stem.channel[i] >= 0) {
+                snd_sfx_chn_free(stem.channel[i]);
+                stem.channel[i] = -1;
             }
-            if (snd_is_playing(channel_[i])) {
-                snd_shutdown();
-                channel_[0] = channel_[1] = -1;
-                address_[0] = address_[1] = 0;
-                break;
+            if (stem.address[i]) {
+                snd_mem_free(stem.address[i]);
+                stem.address[i] = 0;
             }
         }
-        active_ = false;
-    }
-    for (unsigned i = 0; i < 2; ++i) {
-        if (channel_[i] >= 0) {
-            snd_sfx_chn_free(channel_[i]);
-            channel_[i] = -1;
+        if (stem.open) {
+            ov_clear(&stem.decoder);
+            stem.open = false;
         }
-        if (address_[i]) {
-            snd_mem_free(address_[i]);
-            address_[i] = 0;
-        }
-    }
-    if (opened_) {
-        ov_clear(&decoder_);
-        opened_ = false;
+        stem.channels = stem.frames = stem.decoded = 0;
     }
 }
 
