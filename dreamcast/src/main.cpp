@@ -14,13 +14,13 @@
 #include <arch/timer.h>
 #include <dc/maple.h>
 #include <dc/maple/controller.h>
+#include <dc/maple/keyboard.h>
 #include <dc/sound/sfxmgr.h>
 #include <dc/sound/sound.h>
 #include <kos/init.h>
 
 namespace {
 
-constexpr unsigned strum_buttons = CONT_DPAD_UP | CONT_DPAD_DOWN | CONT_A;
 constexpr unsigned countdown_ms = 3000;
 
 enum Effect : unsigned {
@@ -52,7 +52,9 @@ public:
 
     void play(Effect effect) const {
         if (samples_[effect] != SFXHND_INVALID) {
-            snd_sfx_play(samples_[effect], 204, 128);
+            constexpr unsigned sfx_volume = 179;  // 70%
+            constexpr unsigned miss_volume = 64;  // 25%
+            snd_sfx_play(samples_[effect], effect >= miss1 ? miss_volume : sfx_volume, 128);
         }
     }
 
@@ -115,10 +117,77 @@ void tutorial_cue(dc::Frame &frame, const std::vector<Cue> &cues) {
 
 static dc::Audio audio;
 
-uint8_t read_frets(const cont_state_t &pad) {
-    return (pad.ltrig >= 96 ? 1u << 0 : 0) | (pad.buttons & CONT_X ? 1u << 1 : 0) |
-           (pad.buttons & CONT_Y ? 1u << 2 : 0) | (pad.buttons & CONT_B ? 1u << 3 : 0) |
-           (pad.rtrig >= 96 ? 1u << 4 : 0);
+enum InputButton : unsigned {
+    nav_up = 1u << 0, nav_down = 1u << 1, nav_left = 1u << 2, nav_right = 1u << 3,
+    select_option = 1u << 4, cancel_option = 1u << 5, pause_song = 1u << 6,
+    pick_up = 1u << 7, pick_down = 1u << 8, pick_extra = 1u << 9,
+    activate_power = 1u << 10, killswitch = 1u << 11
+};
+
+struct Input {
+    dc::InputDevice device = dc::InputDevice::none;
+    unsigned buttons = 0;
+    uint8_t frets = 0;
+};
+
+Input read_input() {
+    auto *keyboard = maple_enum_type(0, MAPLE_FUNC_KEYBOARD);
+    if (const auto *keys = kbd_get_state(keyboard)) {
+        Input input{dc::InputDevice::keyboard};
+        for (unsigned fret = 0; fret < 5; ++fret) {
+            if (keys->key_states[KBD_KEY_F1 + fret].is_down ||
+                keys->key_states[KBD_KEY_F6 + fret].is_down) {
+                input.frets |= 1u << fret;
+            }
+        }
+        constexpr struct {
+            kbd_key_t key;
+            unsigned buttons;
+        } bindings[] = {
+            {KBD_KEY_UP, nav_up}, {KBD_KEY_DOWN, nav_down},
+            {KBD_KEY_LEFT, nav_left}, {KBD_KEY_RIGHT, nav_right},
+            {KBD_KEY_ENTER, select_option | pick_down}, {KBD_KEY_ESCAPE, cancel_option | pause_song},
+            {KBD_KEY_PGDOWN, activate_power}, {KBD_KEY_PGUP, killswitch}
+        };
+        for (const auto &binding : bindings) {
+            if (keys->key_states[binding.key].is_down) {
+                input.buttons |= binding.buttons;
+            }
+        }
+        const auto modifiers = keys->cond.modifiers.raw;
+        if (modifiers & KBD_MOD_RSHIFT) {
+            input.buttons |= pick_up;
+        }
+        if (modifiers & KBD_MOD_LCTRL) {
+            input.buttons |= pause_song;
+        }
+        return input;
+    }
+
+    auto *controller = maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
+    const auto *pad = controller ? static_cast<cont_state_t *>(maple_dev_status(controller)) : nullptr;
+    if (!pad) {
+        return {};
+    }
+    Input input{dc::InputDevice::controller};
+    constexpr struct {
+        unsigned key;
+        unsigned buttons;
+    } bindings[] = {
+        {CONT_DPAD_UP, nav_up | pick_up}, {CONT_DPAD_DOWN, nav_down | pick_down},
+        {CONT_DPAD_LEFT, nav_left | activate_power}, {CONT_DPAD_RIGHT, nav_right | killswitch},
+        {CONT_A, select_option | pick_extra}, {CONT_START, select_option | pause_song},
+        {CONT_B, cancel_option}
+    };
+    for (const auto &binding : bindings) {
+        if (pad->buttons & binding.key) {
+            input.buttons |= binding.buttons;
+        }
+    }
+    input.frets = (pad->ltrig >= 96 ? 1u << 0 : 0) | (pad->buttons & CONT_X ? 1u << 1 : 0) |
+                  (pad->buttons & CONT_Y ? 1u << 2 : 0) | (pad->buttons & CONT_B ? 1u << 3 : 0) |
+                  (pad->rtrig >= 96 ? 1u << 4 : 0);
+    return input;
 }
 
 unsigned move_list(unsigned current, unsigned count, int direction) {
@@ -221,20 +290,19 @@ int main() {
     };
 
     for (;;) {
-        auto *device = maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
-        const auto *pad = device ? static_cast<cont_state_t *>(maple_dev_status(device)) : nullptr;
-        const unsigned buttons = pad ? pad->buttons : 0;
-        const unsigned pressed = buttons & ~previous_buttons;
-        previous_buttons = buttons;
-        frame.held = pad ? read_frets(*pad) : 0;
-        frame.connected = pad != nullptr;
+        const auto input = read_input();
+        const bool same_device = input.device == frame.input;
+        const unsigned pressed = same_device ? input.buttons & ~previous_buttons : 0;
+        previous_buttons = input.buttons;
+        frame.held = input.frets;
+        frame.input = input.device;
         const auto highest_fret = [](uint8_t held) { return held ? 32 - __builtin_clz(held) : 0; };
-        const bool fret_changed = highest_fret(previous_held) != highest_fret(frame.held);
+        const bool fret_changed = same_device && highest_fret(previous_held) != highest_fret(frame.held);
         previous_held = frame.held;
-        const bool confirm = pressed & (CONT_A | CONT_START);
-        const bool cancel = pressed & CONT_B;
-        const int step = bool(pressed & CONT_DPAD_DOWN) - bool(pressed & CONT_DPAD_UP);
-        const int adjust = bool(pressed & CONT_DPAD_RIGHT) - bool(pressed & CONT_DPAD_LEFT);
+        const bool confirm = pressed & select_option;
+        const bool cancel = pressed & cancel_option;
+        const int step = bool(pressed & nav_down) - bool(pressed & nav_up);
+        const int adjust = bool(pressed & nav_right) - bool(pressed & nav_left);
         const auto &chart = song.guitar[frame.difficulty];
         frame.caption = nullptr;
         frame.tutorial_picture = -1;
@@ -333,7 +401,7 @@ int main() {
                                 audio.position_ms(),
                                 static_cast<unsigned long long>(timer_ms_gettime64() - round_start_ms),
                                 rendered_frames, round.hits, round.misses, round.overstrums, round.score);
-                } else if (pressed & CONT_START) {
+                } else if (pressed & pause_song) {
                     if (audio.pause()) {
                         frame.selected = 0;
                         frame.screen = dc::Screen::pause;
@@ -349,12 +417,12 @@ int main() {
                     const bool was_power = round.power_active;
                     const auto previous_power = round.power;
                     round.advance(chart, frame.time_ms, frame.held, rules);
-                    if (pressed & CONT_DPAD_LEFT && round.activate_power()) {
+                    if (pressed & activate_power && round.activate_power()) {
                         sounds.play(power);
                     } else if (was_power && !round.power_active) {
                         sounds.play(lost);
                     }
-                    const bool strum = pressed & strum_buttons;
+                    const bool strum = pressed & (pick_up | pick_down | pick_extra);
                     const bool tap = !strum && fret_changed;
                     if (strum || tap) {
                         const auto pick = round.pick(chart, frame.time_ms, frame.held, rules, tap);
@@ -370,7 +438,7 @@ int main() {
                         sounds.play(ding);
                     }
                     last_stars = earned;
-                    const bool whammy = (buttons & CONT_DPAD_RIGHT) && round.sustain_frets;
+                    const bool whammy = (input.buttons & killswitch) && round.sustain_frets;
                     const float miss_gain = audio.has_guitar() ? 0.2f : 0.9f;
                     audio.guitar_gain(whammy ? 0.0f : (round.guitar_muted ? miss_gain : 1.0f));
                     if (!training && round.rock <= 0.0f) {
@@ -387,7 +455,8 @@ int main() {
                 frame.selected = move_list(frame.selected, 3, step);
                 toggle(step);
                 frame.delay_ms = std::clamp(frame.delay_ms + 10 * adjust, -250, 250);
-                if (cancel || (confirm && frame.selected == 0)) {
+                if (cancel || (frame.input == dc::InputDevice::keyboard && (pressed & pause_song)) ||
+                    (confirm && frame.selected == 0)) {
                     resume();
                 } else if (confirm && frame.selected == 1) {
                     begin_countdown();

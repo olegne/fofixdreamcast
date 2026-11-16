@@ -2,16 +2,19 @@
 
 Port nativo em desenvolvimento. A referência é o FoFiX de PC no commit `f7e4e403`, com o tema padrão MegaLight V4. A compilação de desenvolvimento inclui **FoF Tutorial**, com as duas trilhas originais de 44,1 kHz, e **Circuito 01**, usada em testes do port.
 
-## Controle
+## Teclado
 
-| Ação | Controle Dreamcast |
+O teclado Maple é a entrada principal. No Flycast, selecione **Keyboard** como dispositivo da porta A.
+
+| Ação | Tecla |
 | --- | --- |
-| Navegar | D-pad. A confirma e B volta |
-| Cinco casas, da esquerda para a direita | L, X, Y, B, R |
-| Palhetar | D-pad para cima ou para baixo, ou A |
-| Star Power | D-pad para esquerda |
-| Killswitch durante sustains | D-pad para direita |
-| Pausa | START |
+| Navegar | Setas. Enter confirma e Esc volta |
+| Cinco casas, da esquerda para a direita | F1 a F5 |
+| Teclas alternativas para as cinco casas | F6 a F10 |
+| Palhetar | Enter ou Shift direito |
+| Star Power | Page Down |
+| Killswitch durante sustains | Page Up |
+| Pausar | Ctrl esquerdo ou Esc |
 
 O menu Settings permite ajustar o atraso de áudio/vídeo e a velocidade da pista. Um atraso positivo faz as notas chegarem mais tarde.
 
@@ -30,7 +33,7 @@ make -C dreamcast cdi SONGS_DIR=/caminho/para/songs
 
 ## Validação
 
-Os testes atuais cobrem guitarra solo no Flycast. O tutorial original teve 59 alvos concluídos com entradas automatizadas. A comparação das três dificuldades do tutorial com o leitor do FoFiX de PC confirmou o começo, a duração e a classificação HO/PO dos 189 eventos de nota.
+Os testes atuais cobrem guitarra solo no Flycast. O FoF Tutorial em Expert teve 59 alvos concluídos usando o teclado Maple emulado e alternando Enter e Shift direito. O perfil de teste também exercitou acordes de cinco casas, HO/PO, pausa, Star Power e Killswitch. A comparação das três dificuldades do tutorial com o leitor do FoFiX de PC confirmou o começo, a duração e a classificação HO/PO dos 189 eventos de nota.
 
 Ainda estão em desenvolvimento os modos com outros instrumentos, o multiplayer e a compatibilidade com todos os tipos de chart, efeitos de palco e regras da versão de PC. A validação em Dreamcast físico também está pendente.
 

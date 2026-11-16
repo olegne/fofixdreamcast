@@ -500,6 +500,7 @@ Pick Round::pick(const Chart &chart, int time_ms, uint8_t held, const Rules &rul
     guitar_muted = false;
     last_hit_frets = chord.frets;
     last_hit_ms = time_ms;
+    last_hit_offset_ms = time_ms - chord.time_ms;
 
     sustain_start_ms_ = std::max(time_ms, chord.time_ms);
     sustain_end_ms_ = std::numeric_limits<int>::max();

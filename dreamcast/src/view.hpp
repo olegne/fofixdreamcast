@@ -10,6 +10,7 @@
 namespace dc {
 
 enum class Screen { menu, settings, setlist, difficulty, countdown, play, pause, results, failed, error };
+enum class InputDevice { none, keyboard, controller };
 
 struct Frame {
     Screen screen = Screen::menu;
@@ -23,7 +24,7 @@ struct Frame {
     unsigned gems = 0;
     uint8_t available = 0;
     uint8_t held = 0;
-    bool connected = false;
+    InputDevice input = InputDevice::none;
     const char *title = "";
     const char *artist = "";
     const char *error = "";
@@ -41,7 +42,8 @@ public:
 private:
     enum TextureId {
         main_bg, main_text, version, options_bg, stage, neck, power_neck, strings, bars, measure, beat,
-        half, frets, notes, flame, glow, tail, hud, meter, star, star_off, pause_image, rock, fail,
+        half, frets, notes, flame, glow, tail, tail_end, tail_held, tail_held_end,
+        hud, meter, star, star_off, pause_image, rock, fail,
         font, score_font, tutorial_pose, tutorial_keyboard, tutorial_escape, gem_a, gem_b, gem_c,
         gem_d, gem_e, power_a, power_b, power_c, power_d, power_e, texture_count
     };
@@ -73,6 +75,7 @@ private:
                     uint32_t back = 0xffffffff, uint32_t front = 0xffffffff);
     void text(float x, float y, const char *line, float size, uint32_t color,
               bool centered = false, bool numeric = false);
+    void draw_tail(float x, float start, float end, float scroll, uint32_t color, bool held);
     void world(const Frame &frame, const SongChart &song, const Round &round,
                const Chart &chart, float period_ms);
     void draw_note_mesh(const Chord &chord, unsigned lane, float z);

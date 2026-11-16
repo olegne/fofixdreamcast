@@ -80,6 +80,7 @@ public:
     uint8_t sustain_frets = 0;
     uint8_t last_hit_frets = 0;
     int last_hit_ms = -1000;
+    int last_hit_offset_ms = 0;
 
 private:
     void miss(const Chord &chord);

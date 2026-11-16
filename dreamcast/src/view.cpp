@@ -141,7 +141,8 @@ bool View::init() {
     vid_set_mode(DM_640x480, PM_RGB565);
     const pvr_init_params_t params{
         {PVR_BINSIZE_32, PVR_BINSIZE_0, PVR_BINSIZE_32, PVR_BINSIZE_0, PVR_BINSIZE_0},
-        768 * 1024, 0, 0, 0, 3, 1
+        // Draw translucent board layers in submission order so the neck cannot cover the tails.
+        768 * 1024, 0, 0, 1, 3, 1
     };
     if (pvr_init(&params) < 0) {
         return false;
@@ -149,7 +150,8 @@ bool View::init() {
     pvr_set_bg_color(0, 0, 0);
     constexpr const char *names[] = {
         "main", "maintext", "version", "options", "stage", "neck", "neck-power", "strings", "bars", "measure",
-        "beat", "half", "frets", "notes", "flame", "glow", "tail", "hud", "meter", "star",
+        "beat", "half", "frets", "notes", "flame", "glow", "tail", "tail-end",
+        "tail-held", "tail-held-end", "hud", "meter", "star",
         "star-off", "pause", "rock", "fail", "font", "score-font", "tutorial-pose",
         "tutorial-keyboard", "tutorial-escape", "gem-a", "gem-b", "gem-c",
         "gem-d", "gem-e", "power-a", "power-b", "power-c", "power-d", "power-e"
@@ -158,7 +160,8 @@ bool View::init() {
     for (unsigned i = 0; i < texture_count; ++i) {
         const auto id = static_cast<TextureId>(i);
         const bool opaque = id == main_bg || id == options_bg || id == stage || id >= gem_a;
-        const bool repeat = id == neck || id == power_neck || id == strings || id == bars || id == tail;
+        const bool repeat = id == neck || id == power_neck || id == strings || id == bars ||
+                            id == tail || id == tail_held;
         if (!load_texture(id, names[i], opaque, repeat, id == flame || id == glow)) {
             return false;
         }
@@ -242,17 +245,30 @@ void View::draw_note_mesh(const Chord &chord, unsigned lane, float z) {
     }
 }
 
+void View::draw_tail(float x, float start, float end, float scroll, uint32_t color, bool held) {
+    constexpr float half_width = 0.4f;
+    const auto body = held ? tail_held : tail;
+    board_quad(body, x + half_width, x - half_width, 0.027f, start, end,
+               1, scroll + (end - start) * 0.375f, 0, scroll, color, color);
+    if (end < board_length) {
+        const auto cap = held ? tail_held_end : tail_end;
+        board_quad(cap, x + half_width, x - half_width, 0.027f, end, end + 0.6f,
+                   1, 1, 0, 0, color, color);
+    }
+}
+
 void View::world(const Frame &f, const SongChart &song, const Round &round, const Chart &chart,
                  float period_ms) {
     const auto distance = board_z(f.time_ms, period_ms);
     const float scroll = std::fmod(distance * 0.125f, 1.0f);
+    const float tail_scroll = std::fmod(distance * 0.375f, 1.0f);
     const auto draw_surface = [&](TextureId texture, float y) {
         board_quad(texture, left_edge, right_edge, y, -2.0f, -1.0f,
-                    0, scroll - 0.125f, 1, scroll - 0.25f, white, 0x00ffffff);
+                    1, scroll - 0.125f, 0, scroll - 0.25f, white, 0x00ffffff);
         board_quad(texture, left_edge, right_edge, y, -1.0f, 6.3f,
-                    0, scroll + 0.7875f, 1, scroll - 0.125f);
+                    1, scroll + 0.7875f, 0, scroll - 0.125f);
         board_quad(texture, left_edge, right_edge, y, 6.3f, 9.0f,
-                    0, scroll + 1.125f, 1, scroll + 0.7875f, 0x00ffffff, white);
+                    1, scroll + 1.125f, 0, scroll + 0.7875f, 0x00ffffff, white);
     };
     draw_surface(neck, 0.0f);
     if (round.power_active) {
@@ -293,10 +309,10 @@ void View::world(const Frame &f, const SongChart &song, const Round &round, cons
             }
             const auto x = lane_x(n);
             const auto end = board_z(chord.ends[n] - 50 - f.time_ms, period_ms);
-            if (chord.ends[n] - chord.time_ms > 120 && number >= round.next && end > -1.3f) {
-                board_quad(tail, x + 0.102f, x - 0.102f, 0.016f, std::max(-1.3f, z),
-                           std::min(board_length, end), 0, 0, 1, (end - z) * 0.35f,
-                           tint(fret_colors[n], (board_length - z) / 1.8f), fret_colors[n]);
+            const float minimum_tail_ms = song.us_per_beat(chord.time_ms) * 0.00035f;
+            if (chord.ends[n] - chord.time_ms > minimum_tail_ms && number >= round.next && end > -1.3f) {
+                draw_tail(x, std::max(-1.3f, z), std::min(board_length, end), tail_scroll,
+                          tint(fret_colors[n], (board_length - z) / 1.8f), false);
             }
             // The hardware vertex budget reserves the detailed mesh for notes near the strike line.
             if (number >= round.next && (z > 7.4f || visible_gems >= 17)) {
@@ -310,14 +326,12 @@ void View::world(const Frame &f, const SongChart &song, const Round &round, cons
             ++visible_gems;
         }
     }
-    if (round.sustain_frets) {
+    if (round.sustain_frets && round.sustained_until() > f.time_ms + 50) {
         const auto end = std::clamp(board_z(round.sustained_until() - f.time_ms - 50, period_ms),
                                     0.0f, board_length);
         for (unsigned n = 0; n < 5; ++n) {
             if (round.sustain_frets & (1u << n)) {
-                const auto x = lane_x(n);
-                board_quad(tail, x + 0.124f, x - 0.124f, 0.027f, 0.0f, end, 0, 0, 1, end * 0.35f,
-                           fret_colors[n], fret_colors[n]);
+                draw_tail(lane_x(n), 0.0f, end, tail_scroll, fret_colors[n], true);
             }
         }
     }
@@ -328,7 +342,7 @@ void View::world(const Frame &f, const SongChart &song, const Round &round, cons
         const bool lit = ((round.last_hit_frets & (1u << n)) && since_hit < 170) ||
                          (round.sustain_frets & (1u << n));
         const float row = f.held & (1u << n) ? 1.0f : (lit ? 2.0f : 0.0f);
-        board_quad(frets, x + 0.3f, x - 0.3f, 0.035f, -0.25f, 0.25f,
+        board_quad(frets, x + 0.3f, x - 0.3f, 0.0f, -0.25f, 0.25f,
                     n * 0.2f, row / 3.0f, (n + 1) * 0.2f, (row + 1) / 3.0f);
         if (lit) {
             auto p = project(x, 0.05f, 0, 0, 0, white, false);
@@ -365,22 +379,31 @@ void View::draw_rockmeter(const Frame &frame, const Round &round, const Chart &c
         while (*first == '0' && first[1]) {
             ++first;
         }
-        text(x, 442, value, scale, 0xff606060, false, true);
+        text(x, 442, value, scale, 0xff999999, false, true);
         text(x + (first - value) * widths_[1]['0' - 32] * scale, 442, first, scale, white,
              false, true);
     };
     text(16, 442, "Score", 0.75f, white, false, true);
-    draw_number(80, round.display_score(frame.time_ms, rules), 7);
+    draw_number(80, round.score, 7);
     text(474, 442, "Streak", 0.76f, white, false, true);
     draw_number(575, round.streak, 4);
     const int time = std::max(0, frame.time_ms / 1000);
     std::snprintf(value, sizeof(value), "%d:%02d/%d:%02d", time / 60, time % 60,
                   frame.duration_ms / 60000, (frame.duration_ms / 1000) % 60);
-    text(320, 452, value, 0.8f, white, true);
+    text(320, 460, value, 0.68f, white, true);
     const unsigned stars = round.rating(frame.gems, chart.size(), frame.time_ms, rules);
     sprite(stars ? star : star_off, 585, 389, 45, 43, menu_depth + 0.1f);
     std::snprintf(value, sizeof(value), "%u", stars);
     text(562, 397, value, 0.8f, white, true, true);
+    if (frame.screen == Screen::play && round.streak) {
+        constexpr const char *late[] = {"-Excellent!", "Slightly Late", "Late", "Very Late"};
+        constexpr const char *early[] = {"+Excellent!", "Slightly Early", "Early", "Very Early"};
+        constexpr uint32_t colors[] = {0xff00ff00, 0xffffff00, 0xffffff00, 0xffff0000};
+        const auto offset = round.last_hit_offset_ms;
+        const auto band = std::min(3u, static_cast<unsigned>(std::abs(offset) * 4 / rules.late_ms));
+        const auto *label = offset == 0 ? "Perfect!!" : (offset > 0 ? late[band] : early[band]);
+        text(572, 171, label, 0.65f, offset == 0 ? 0xff00ffff : colors[band], true);
+    }
 }
 
 void View::menu(const Frame &f, const Chart &chart, const Round &round,
@@ -389,6 +412,9 @@ void View::menu(const Frame &f, const Chart &chart, const Round &round,
     const auto item = [&](float y, const char *label, unsigned index) {
         text(320, y, label, 0.94f, f.selected == index ? gold : white, true);
     };
+    const bool keyboard = f.input == InputDevice::keyboard;
+    const char *navigation = keyboard ? "Arrows     Enter Select     Esc Back" :
+                                       "Up / Down     A Select     B Back";
     char line[80];
     switch (f.screen) {
         case Screen::menu:
@@ -396,8 +422,8 @@ void View::menu(const Frame &f, const Chart &chart, const Round &round,
             sprite(main_text, 240, 296, 160, 128, menu_depth, 0.5f, f.selected / 5.0f,
                    1.0f, (f.selected + 1) / 5.0f);
             sprite(version, 160, 448, 320, 17.2f, menu_depth);
-            if (!f.connected) {
-                text(320, 425, "Connect a controller", 0.71f, gray, true);
+            if (f.input == InputDevice::none) {
+                text(320, 425, "Connect a keyboard", 0.71f, gray, true);
             }
             break;
         case Screen::settings:
@@ -418,7 +444,7 @@ void View::menu(const Frame &f, const Chart &chart, const Round &round,
             }
             const auto &current = library[f.selected];
             text(320, 377, current.artist.c_str(), 0.77f, gray, true);
-            text(320, 415, "Up / Down     A Select     B Back", 0.75f, gray, true);
+            text(320, 415, navigation, 0.75f, gray, true);
             break;
         }
         case Screen::difficulty:
@@ -428,7 +454,7 @@ void View::menu(const Frame &f, const Chart &chart, const Round &round,
                     item(194 + (3 - i) * 35, difficulties[i], i);
                 }
             }
-            text(320, 410, "Up / Down     A Select     B Back", 0.75f, gray, true);
+            text(320, 410, navigation, 0.75f, gray, true);
             break;
         case Screen::countdown:
             text(38, 65, f.title, 0.95f, white);
@@ -473,7 +499,7 @@ void View::menu(const Frame &f, const Chart &chart, const Round &round,
         case Screen::error:
             title("Load Error");
             text(320, 208, f.error, 0.76f, white, true);
-            text(320, 321, "B Back", 0.82f, gold, true);
+            text(320, 321, keyboard ? "Esc Back" : "B Back", 0.82f, gold, true);
             break;
         case Screen::play:
             if (f.tutorial_picture >= 0) {
@@ -485,8 +511,8 @@ void View::menu(const Frame &f, const Chart &chart, const Round &round,
                        y - heights[picture] / 2, widths[picture], heights[picture], menu_depth + 0.2f);
             }
             if (f.caption) {
-                text(321, 451, f.caption, 0.83f, 0xff000000, true);
-                text(320, 450, f.caption, 0.83f, white, true);
+                text(321, 447, f.caption, 0.73f, 0xff000000, true);
+                text(320, 446, f.caption, 0.73f, white, true);
             }
             break;
     }

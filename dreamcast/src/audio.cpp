@@ -14,6 +14,8 @@
 namespace dc {
 namespace {
 
+constexpr unsigned backing_volume = 204; // FoFiX's 80% background volume.
+
 struct AicaCommand {
     alignas(32) uint32_t packet[AICA_CMDSTR_CHANNEL_SIZE]{};
 
@@ -168,7 +170,7 @@ void Audio::queue_start() {
         for (unsigned i = 0; i < stem.channels; ++i) {
             voice->base = stem.address[i];
             voice->pan = stem.channels == 1 ? 128 : (i == 0 ? 0 : 255);
-            voice->vol = &stem == &stems_[1] || !has_guitar() ? guitar_volume_ : 255;
+            voice->vol = &stem == &stems_[1] || !has_guitar() ? guitar_volume_ : backing_volume;
             cmd.send(stem.channel[i], AICA_CH_CMD_START | AICA_CH_START_DELAY);
             mask |= uint64_t{1} << stem.channel[i];
         }
