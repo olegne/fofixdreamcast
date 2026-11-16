@@ -38,8 +38,9 @@ private:
     };
 
     bool open(Stem &stem, const char *path);
+    bool decode(Stem &stem, unsigned count);
     bool fill(Stem &stem, unsigned block);
-    bool prepare(unsigned position);
+    void begin_stream(unsigned position);
     void queue_start();
     bool halt();
     void fail(const char *message);
@@ -47,6 +48,7 @@ private:
     Stem stems_[2];
     alignas(32) int16_t decoded_[block_frames * 2];
     alignas(32) int16_t split_[2][block_frames];
+    alignas(32) int16_t resume_pcm_[ring_frames];
     bool active_ = false;
     bool paused_ = false;
     bool clock_ready_ = false;

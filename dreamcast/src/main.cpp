@@ -146,7 +146,7 @@ Input read_input() {
         } bindings[] = {
             {KBD_KEY_UP, nav_up}, {KBD_KEY_DOWN, nav_down},
             {KBD_KEY_LEFT, nav_left}, {KBD_KEY_RIGHT, nav_right},
-            {KBD_KEY_ENTER, select_option | pick_down}, {KBD_KEY_ESCAPE, cancel_option | pause_song},
+            {KBD_KEY_ENTER, select_option | pick_down}, {KBD_KEY_ESCAPE, cancel_option},
             {KBD_KEY_PGDOWN, activate_power}, {KBD_KEY_PGUP, killswitch}
         };
         for (const auto &binding : bindings) {
@@ -274,10 +274,11 @@ int main() {
         frame.time_ms = -frame.delay_ms - entry.delay_ms;
         frame.screen = dc::Screen::play;
     };
-    const auto resume = [&] {
+    const auto resume_audio = [&] {
         if (audio.resume()) {
             frame.screen = dc::Screen::play;
-            std::printf("FoFiXDC: resumed at %d ms\n", audio.position_ms());
+            std::printf("FoFiXDC: resumed %d ms, wait %llu ms\n", audio.position_ms(),
+                        static_cast<unsigned long long>(timer_ms_gettime64() - countdown_start));
         } else {
             frame.screen = dc::Screen::error;
             frame.error = audio.error();
@@ -417,7 +418,9 @@ int main() {
                     const bool was_power = round.power_active;
                     const auto previous_power = round.power;
                     round.advance(chart, frame.time_ms, frame.held, rules);
-                    if (pressed & activate_power && round.activate_power()) {
+                    const bool power_pressed = (pressed & activate_power) ||
+                                               (cancel && frame.input == dc::InputDevice::keyboard);
+                    if (power_pressed && round.activate_power()) {
                         sounds.play(power);
                     } else if (was_power && !round.power_active) {
                         sounds.play(lost);
@@ -457,11 +460,24 @@ int main() {
                 frame.delay_ms = std::clamp(frame.delay_ms + 10 * adjust, -250, 250);
                 if (cancel || (frame.input == dc::InputDevice::keyboard && (pressed & pause_song)) ||
                     (confirm && frame.selected == 0)) {
-                    resume();
+                    countdown_start = timer_ms_gettime64();
+                    frame.countdown = countdown_ms / 1000;
+                    frame.screen = dc::Screen::resume_countdown;
                 } else if (confirm && frame.selected == 1) {
                     begin_countdown();
                 } else if (confirm) {
                     to_setlist();
+                }
+                break;
+            }
+            case dc::Screen::resume_countdown: {
+                const auto elapsed = timer_ms_gettime64() - countdown_start;
+                if (pressed & pause_song) {
+                    frame.screen = dc::Screen::pause;
+                } else if (elapsed >= countdown_ms) {
+                    resume_audio();
+                } else {
+                    frame.countdown = (countdown_ms - elapsed + 999) / 1000;
                 }
                 break;
             }

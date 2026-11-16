@@ -9,7 +9,9 @@
 
 namespace dc {
 
-enum class Screen { menu, settings, setlist, difficulty, countdown, play, pause, results, failed, error };
+enum class Screen {
+    menu, settings, setlist, difficulty, countdown, play, pause, resume_countdown, results, failed, error
+};
 enum class InputDevice { none, keyboard, controller };
 
 struct Frame {

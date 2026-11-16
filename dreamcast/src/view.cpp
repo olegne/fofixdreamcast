@@ -462,6 +462,11 @@ void View::menu(const Frame &f, const Chart &chart, const Round &round,
             std::snprintf(line, sizeof(line), "%d", f.countdown);
             text(320, 162, line, 2.55f, white, true, true);
             break;
+        case Screen::resume_countdown:
+            // MegaLight V4's countdown is centered at (0.5, 0.45) in its width-normalized viewport.
+            std::snprintf(line, sizeof(line), "%d", f.countdown);
+            text(320, 288, line, 2.55f, white, true, true);
+            break;
         case Screen::pause:
             sprite(pause_image, 302, 100, 36, 36, menu_depth + 0.1f);
             title("Paused");
@@ -521,7 +526,7 @@ void View::menu(const Frame &f, const Chart &chart, const Round &round,
 void View::draw(const Frame &f, const SongChart &song, const Round &round,
                 const std::vector<SongEntry> &library) {
     const bool playing = f.screen == Screen::play || f.screen == Screen::pause ||
-                         f.screen == Screen::countdown;
+                         f.screen == Screen::countdown || f.screen == Screen::resume_countdown;
     const float bpm = 60000000.0f / song.us_per_beat(f.time_ms);
     constexpr float speeds[] = {226.0f, 256.0f, 286.0f, 306.0f};
     const float period_ms = (speeds[f.difficulty] - std::min(200.0f, bpm) / 10.0f) *

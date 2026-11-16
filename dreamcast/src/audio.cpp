@@ -47,9 +47,15 @@ bool Audio::start(const char *backing, const char *guitar) {
         return false;
     }
     length_frames_ = std::max(stems_[0].frames, stems_[1].frames);
-    if (!prepare(0)) {
-        return false;
+    for (auto &stem : stems_) {
+        for (unsigned block = 0; stem.open && block < blocks; ++block) {
+            if (!fill(stem, block)) {
+                fail("Error decoding the audio track.");
+                return false;
+            }
+        }
     }
+    begin_stream(0);
     std::printf("FoFiXDC: audio %u Hz, backing=%u ch guitar=%u ch samples=%u\n",
                 rate_, stems_[0].channels, stems_[1].channels, length_frames_);
     return true;
@@ -94,8 +100,8 @@ bool Audio::open(Stem &stem, const char *path) {
     return true;
 }
 
-bool Audio::fill(Stem &stem, unsigned block) {
-    const auto frames = std::min(block_frames, stem.frames - stem.decoded);
+bool Audio::decode(Stem &stem, unsigned count) {
+    const auto frames = std::min(count, stem.frames - stem.decoded);
     const unsigned bytes = frames * stem.channels * sizeof(int16_t);
     auto *pcm = reinterpret_cast<char *>(decoded_);
     unsigned offset = 0;
@@ -108,8 +114,15 @@ bool Audio::fill(Stem &stem, unsigned block) {
         offset += static_cast<unsigned>(got);
     }
     stem.decoded += frames;
+    std::memset(pcm + offset, 0, (count - frames) * stem.channels * sizeof(int16_t));
+    return true;
+}
+
+bool Audio::fill(Stem &stem, unsigned block) {
+    if (!decode(stem, block_frames)) {
+        return false;
+    }
     const auto block_bytes = block_frames * sizeof(int16_t);
-    std::memset(pcm + offset, 0, block_bytes * stem.channels - offset);
     if (stem.channels == 1) {
         spu_memload_sq(stem.address[0] + block * block_bytes, decoded_, block_bytes);
     } else {
@@ -124,27 +137,7 @@ bool Audio::fill(Stem &stem, unsigned block) {
     return true;
 }
 
-bool Audio::prepare(unsigned position) {
-    for (auto &stem : stems_) {
-        if (!stem.open) {
-            continue;
-        }
-        const auto offset = std::min(position, stem.frames);
-        if (stem.decoded != offset) {
-            stem.decoded = offset;
-            if (stem.decoded < stem.frames && ov_pcm_seek(&stem.decoder, stem.decoded) != 0) {
-                fail("Could not seek in the audio track.");
-                return false;
-            }
-        }
-        for (unsigned block = 0; block < blocks; ++block) {
-            if (!fill(stem, block)) {
-                fail("Error decoding the audio track.");
-                return false;
-            }
-        }
-    }
-
+void Audio::begin_stream(unsigned position) {
     ring_origin_ = played_frames_ = position;
     last_cursor_ = 0;
     clock_ready_ = false;
@@ -152,7 +145,6 @@ bool Audio::prepare(unsigned position) {
     active_ = true;
     paused_ = false;
     last_poll_us_ = timer_us_gettime64();
-    return true;
 }
 
 void Audio::queue_start() {
@@ -266,7 +258,36 @@ bool Audio::pause() {
 }
 
 bool Audio::resume() {
-    return paused_ && prepare(played_frames_);
+    if (!paused_) {
+        return false;
+    }
+
+    // Completed blocks have already been refilled. The unread PCM wraps from
+    // last_cursor_ to the start of its block. Rotate it to sample zero, then
+    // decode ahead to fill the space reclaimed from the current block.
+    if (last_cursor_) {
+        const auto consumed = last_cursor_ % block_frames;
+        for (auto &stem : stems_) {
+            if (!stem.open) {
+                continue;
+            }
+            if (!decode(stem, consumed)) {
+                fail("Error decoding the audio track.");
+                return false;
+            }
+            for (unsigned channel = 0; channel < stem.channels; ++channel) {
+                spu_memread(resume_pcm_, stem.address[channel], sizeof(resume_pcm_));
+                std::rotate(resume_pcm_, resume_pcm_ + last_cursor_, resume_pcm_ + ring_frames);
+                auto *tail = resume_pcm_ + ring_frames - consumed;
+                for (unsigned i = 0; i < consumed; ++i) {
+                    tail[i] = decoded_[i * stem.channels + channel];
+                }
+                spu_memload_sq(stem.address[channel], resume_pcm_, sizeof(resume_pcm_));
+            }
+        }
+    }
+    begin_stream(played_frames_);
+    return true;
 }
 
 void Audio::guitar_gain(float volume) {
