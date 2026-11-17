@@ -2,8 +2,10 @@
 #pragma once
 
 #include "chart.hpp"
+#include "guitar_visual_clock.hpp"
 #include "credits.hpp"
 #include "editor.hpp"
+#include "ranking.hpp"
 #include "records.hpp"
 #include "settings.hpp"
 #include "language.hpp"
@@ -14,9 +16,12 @@
 
 namespace dc {
 
+class SongChooser;
+
 enum class Screen {
     menu, settings, setlist, difficulty, countdown, play, pause, results, failed, error, credits,
-    editor_menu, editor_import, editing, editor_actions, editor_value, editor_tempo, editor_message
+    editor_menu, editor_import, editing, editor_actions, editor_value, editor_tempo, editor_label,
+    editor_saving, editor_message
 };
 enum class InputDevice { none, keyboard, controller };
 
@@ -25,6 +30,7 @@ struct Frame {
     CreditsFrame credits;
     const SongEditor *editor = nullptr;
     const std::vector<SongEntry> *import_sources = nullptr;
+    const std::vector<EditorLabel> *editor_labels = nullptr;
     std::string editor_text;
     bool editor_playing = false;
     unsigned editor_age_ms = 0;
@@ -42,6 +48,8 @@ struct Frame {
     std::string score_name;
     size_t result_song = 0;
     int highscore_rank = -1;
+    UploadStatus upload_status = UploadStatus::idle;
+    int upload_ordinal = 0;
     const ScoreBook *scores = nullptr;
     const SettingsMenu *settings_menu = nullptr;
     uint16_t text_scale = 100;
@@ -51,6 +59,7 @@ struct Frame {
     unsigned language = 0;
     uint8_t mods = 0;
     bool library_item = false;
+    const SongChooser *chooser = nullptr;
     std::string search;
     unsigned library_generation = 0;
     bool filter_match = true;
@@ -60,6 +69,7 @@ struct Frame {
     uint8_t available = 0;
     uint8_t held = 0;
     bool strumming = false;
+    bool sustain_expired = false;
     InputDevice input = InputDevice::none;
     const char *title = "";
     const char *artist = "";
@@ -72,7 +82,7 @@ struct Frame {
 class View {
 public:
     bool init();
-    void reset_effects();
+    void reset_effects(bool same_scene = false);
     void record_pick(const Round &round, bool after_stage_update = false);
     void draw(const Frame &frame, const SongChart &song, const Round &round,
               const std::vector<SongEntry> &library);
@@ -99,7 +109,6 @@ private:
         uint32_t codepoint;
         uint16_t x, y;
         uint8_t width, advance;
-        int16_t left;
     };
     struct MeshVertex {
         float x, y, z, shade;
@@ -126,6 +135,7 @@ private:
         float angle = 0.0f;
         float center_y = 0.0f;
         bool label_loaded = false;
+        bool shown = false;
     };
 
     struct CachedLabel {
@@ -157,8 +167,12 @@ private:
     bool load_mesh(const char *name, Shape &mesh);
     bool prepare_cassette_mesh(const char *name, CassetteMesh &mesh);
     TextureId cassette_label(const SongEntry &song) const;
+    TextureId stock_cassette_label(std::string_view key) const;
+    TextureId song_cassette_label(const SongEntry &song) const;
+    void prepare_editor_label(const Frame &frame);
     void prepare_cassette_labels(const Frame &frame, const std::vector<SongEntry> &library);
     void update_cassettes(const Frame &frame, const std::vector<SongEntry> &library);
+    std::array<size_t, 3> visible_cassettes(unsigned selected) const;
     void draw_cassettes(const Frame &frame, const std::vector<SongEntry> &library, bool stickers);
     bool prepare_note_mesh(const char *name, NoteMesh &mesh);
     bool prepare_frets();
@@ -177,32 +191,41 @@ private:
     pvr_vertex_t board_vertex(float x, float y, float z, float u, float v, uint32_t color,
                               bool last, float bias = 0.0f) const;
     void select_language(unsigned index);
+    bool prepare_international_font();
     void apply_mods(unsigned flags);
     const char *tr(const char *source) const { return language_.translate(source); }
-    Glyph glyph_for(uint32_t cp) const;
+    Glyph glyph_for(uint32_t cp, bool &intl) const;
+    float font_height() const;
+    float big_font_height() const;
     unsigned text_width(const char *line) const;
     void text(float x, float y, const char *line, float size, uint32_t color,
-              bool centered = false, float depth_offset = 0);
-    void text_line(float x, float y, const char *line, float size, uint32_t color, float depth);
+              bool centered = false, float depth_offset = 0, float angle = 0);
+    void text_line(float x, float y, const char *line, float size, uint32_t color, float depth,
+                   float sin, float cos);
     void fit_text(float x, float y, const char *line, float width, float size, uint32_t color,
                   float depth_offset = 0);
     void score_stars(float x, float y, float size, unsigned count, uint32_t color);
-    void title_number(float y, const char *digits, float size, uint32_t color);
+    void title_number(float y, const char *digits, float size, uint32_t color, float centering_size = 0);
     void note_mesh(NoteMesh &mesh, unsigned lane, float z, float opacity, bool missed);
     void note_heads(const Frame &frame, const Chart &chart, const Round &round,
                     float period_ms, bool translucent);
     void draw_tail_wave(unsigned lane, const Chord &note, int position_ms, float period_ms,
                         float guitar_time_ms);
-    void world(const Frame &frame, const SongChart &song, const Round &round,
-               const Chart &chart, float period_ms);
+    void world(const Frame &frame, const Round &round, const Chart &chart,
+               const GuitarVisualFrame &timing);
     void update_stage_beat(int time_ms);
-    void update_stage(int time_ms, const SongChart &song);
     void stage_decoration(int time_ms);
     void stage_lights(const Frame &frame, const Round &round);
     bool prepare_light_stage();
     void draw_light_stage(int time_ms, const Round &round);
     void draw_stats(const Frame &frame, const Round &round, const Rules &rules);
     void multiplier_effect(const Frame &frame, const Round &round, float song_period);
+    void update_menu_clock(const Frame &frame);
+    void main_menu_art(float phase, float hidden);
+    void menu_item(float x, float y, const char *label, float size, bool selected, float hidden,
+                   float depth_offset = 0);
+    float wrapped_text(float x, float y, const std::string &label, float size, uint32_t color,
+                       float hidden, float right = 576.0f);
     void menu_backdrop(const Frame &frame);
     void credits(const CreditsFrame &frame);
     void draw_editor(const Frame &frame);
@@ -214,12 +237,21 @@ private:
     CassetteMesh cassette_shell_, cassette_reels_, library_shell_, library_details_;
     std::vector<LabelFace> cassette_sticker_, library_sticker_;
     std::array<CachedLabel, 3> custom_labels_{};
+    TextureId editor_label_preview_ = texture_count;
     std::vector<CassettePosition> cassettes_;
     unsigned library_generation_ = 0;
     uint64_t cassette_enter_ms_ = 0;
     uint64_t cassette_frame_ms_ = 0;
     float cassette_camera_ = 0.0f;
     float cassette_target_ = 0.0f;
+    Screen menu_screen_ = Screen::error;
+    unsigned menu_selected_ = 0;
+    bool menu_results_actions_ = false;
+    SettingsPage menu_settings_page_{};
+    uint64_t menu_enter_ms_ = 0;
+    uint64_t menu_main_enter_ms_ = 0;
+    uint64_t menu_selected_ms_ = 0;
+    uint64_t menu_frame_ms_ = 0;
     unsigned requested_language_ = 0;
     unsigned active_mods_ = 0;
     uint32_t yellow = 0xffffff80;
@@ -229,19 +261,14 @@ private:
     float text_scale_ = 1.0f;
     bool lefty_ = false;
     std::array<uint8_t, 10> international_digits_{};
-    bool international_font_loaded_ = false;
+    bool international_title_loaded_ = false;
     std::array<uint8_t, 95> widths_{};
     std::array<uint8_t, 10> digit_widths_{};
     std::array<float, 4> recent_lanes_{};
     std::array<float, 5> beat_lanes_{};
     size_t recent_pick_count_ = 0;
     size_t beat_lane_count_ = 1;
-    float stage_bpm_ = 50.0f;
-    float stage_target_bpm_ = 50.0f;
-    float stage_beat_period_ = 1200.0f;
-    size_t stage_tempo_ = 0;
-    int stage_beat_ = 0;
-    int last_stage_beat_ms_ = -1;
+    GuitarVisualClock guitar_clock_;
     bool light_stage_attempted_ = false;
     int last_multiplier_ms_ = -1;
     uint64_t guitar_time_origin_ms_ = 0;

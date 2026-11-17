@@ -239,9 +239,11 @@ bool parse_chart(const std::vector<uint8_t> &bytes, SongChart &song, std::string
             const auto &prev = tempos[i - 1];
             tempo.scaled_time = prev.scaled_time + uint64_t(tempo.tick - prev.tick) * prev.us_per_beat;
         }
-        const auto time_ms = tempo.scaled_time / ppqn / 1000;
+        const auto time_us = tempo.scaled_time / ppqn;
+        const auto time_ms = time_us / 1000;
         if (time_ms <= max_song_ms) {
-            parsed.tempos.push_back({static_cast<int>(time_ms), tempo.us_per_beat});
+            parsed.tempos.push_back({static_cast<int>(time_ms), tempo.us_per_beat,
+                                     static_cast<uint16_t>(time_us % 1000)});
         }
     }
 
@@ -336,7 +338,7 @@ bool parse_chart(const std::vector<uint8_t> &bytes, SongChart &song, std::string
 
 } // namespace
 
-bool load_song_chart(const char *path, SongChart &song, std::string &error, bool allow_empty) {
+bool load_song_midi(const char *path, std::vector<uint8_t> &bytes, std::string &error) {
     auto *file = std::fopen(path, "rb");
     if (!file) {
         error = "Could not open notes.mid.";
@@ -349,14 +351,19 @@ bool load_song_chart(const char *path, SongChart &song, std::string &error, bool
         error = "Invalid MIDI file length.";
         return false;
     }
-    std::vector<uint8_t> bytes(static_cast<size_t>(size));
+    bytes.resize(static_cast<size_t>(size));
     const auto read = std::fread(bytes.data(), 1, bytes.size(), file);
     std::fclose(file);
     if (read != bytes.size()) {
         error = "Could not read notes.mid.";
         return false;
     }
-    return parse_song_midi(bytes, song, error, allow_empty);
+    return true;
+}
+
+bool load_song_chart(const char *path, SongChart &song, std::string &error, bool allow_empty) {
+    std::vector<uint8_t> bytes;
+    return load_song_midi(path, bytes, error) && parse_song_midi(bytes, song, error, allow_empty);
 }
 
 bool parse_song_midi(const std::vector<uint8_t> &bytes, SongChart &song, std::string &error, bool allow_empty) {

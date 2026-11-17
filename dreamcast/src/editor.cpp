@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <dirent.h>
 #include <limits>
 #include <utility>
 
@@ -15,6 +16,8 @@ constexpr int64_t max_position_us = 3600ll * 1000000;
 constexpr int64_t track_bucket_us = 50000;
 constexpr unsigned midi_ppqn = 480;
 constexpr size_t max_field_length = 60;
+constexpr size_t max_labels = 256;
+constexpr char label_dir[] = "/cd/labels";
 
 int64_t starts(const Chord &chord) {
     return int64_t(chord.time_ms) * 1000 + chord.start_us_remainder;
@@ -60,6 +63,60 @@ bool has_guitar_notes(const SongChart &chart) {
 }
 
 } // namespace
+
+bool valid_label_key(std::string_view key) {
+    if (key.empty() || std::find(stock_label_keys.begin(), stock_label_keys.end(), key) != stock_label_keys.end()) {
+        return true;
+    }
+    // The disc authoring tool limits Joliet basenames. Never let a save select an
+    // arbitrary path or a hidden file through the label extension.
+    return key.size() <= 48 && key.front() != '.' &&
+           std::all_of(key.begin(), key.end(), [](unsigned char ch) {
+               return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+                      (ch >= '0' && ch <= '9') || ch == ' ' || ch == '-' || ch == '_';
+           });
+}
+
+std::string editor_label_path(std::string_view key) {
+    if (key.empty() || key.front() == '@' || !valid_label_key(key)) {
+        return {};
+    }
+    return std::string(label_dir) + "/" + std::string(key);
+}
+
+std::vector<EditorLabel> editor_labels() {
+    std::vector<EditorLabel> labels{
+        {"", "Original cassette label"},
+        {std::string(stock_label_keys[0]), "Bang Bang, Mystery Man"},
+        {std::string(stock_label_keys[1]), "Defy The Machine"},
+        {std::string(stock_label_keys[2]), "This Week I've Been Mostly Playing Guitar"},
+    };
+    auto *dir = opendir(label_dir);
+    if (!dir) {
+        return labels;
+    }
+    const size_t first = labels.size();
+    while (auto *file = readdir(dir)) {
+        const std::string_view name(file->d_name);
+        constexpr std::string_view extension = ".texz";
+        if (name.size() <= extension.size() ||
+            name.substr(name.size() - extension.size()) != extension) {
+            continue;
+        }
+        const auto key = name.substr(0, name.size() - extension.size());
+        if (!editor_label_path(key).empty()) {
+            labels.push_back({std::string(key), std::string(key)});
+        }
+        if (labels.size() == max_labels) {
+            break;
+        }
+    }
+    closedir(dir);
+    std::sort(labels.begin() + first, labels.end(), [](const EditorLabel &a, const EditorLabel &b) {
+        return a.title < b.title;
+    });
+    return labels;
+}
 
 void SongEditor::open(const SongEntry &entry, SongChart chart) {
     *this = {};
@@ -162,7 +219,7 @@ void SongEditor::write_note() {
             set_end(*chord, lane, note_end_);
         }
     }
-    modified_ = true;
+    modified_ = chart_modified_ = true;
 }
 
 void SongEditor::remove_note() {
@@ -176,7 +233,7 @@ void SongEditor::remove_note() {
             chord.frets &= ~fret;
             chord.special_frets &= ~fret;
             set_end(chord, lane_, 0);
-            modified_ = true;
+            modified_ = chart_modified_ = true;
         }
     }
     track.erase(std::remove_if(track.begin(), track.end(), [](const Chord &chord) {
@@ -193,11 +250,7 @@ bool SongEditor::set_field(unsigned field, const std::string &text) {
         (field == 1 ? entry_.title : entry_.artist) = text;
     } else if (field == 3 || field == 4) {
         const double bpm = std::strtod(text.c_str(), &end);
-        if (end == text.c_str() || *end || !std::isfinite(bpm) || bpm < 3.58 || bpm > 600.0) {
-            return false;
-        }
-        chart_.initial_us_per_beat = unsigned(60000000.0 / bpm);
-        chart_.tempos = {{0, chart_.initial_us_per_beat}};
+        return end != text.c_str() && !*end && set_tempo(bpm);
     } else if (field == 5) {
         const long delay = std::strtol(text.c_str(), &end, 10);
         if (end == text.c_str() || *end || delay < -10000 || delay > 10000) {
@@ -220,6 +273,26 @@ bool SongEditor::set_field(unsigned field, const std::string &text) {
     }
     modified_ = true;
     return true;
+}
+
+bool SongEditor::set_tempo(double bpm) {
+    if (!std::isfinite(bpm) || bpm < 3.58 || bpm > 600.0) {
+        return false;
+    }
+    const auto tempo = unsigned(60000000.0 / bpm);
+    if (chart_.initial_us_per_beat != tempo) {
+        chart_.initial_us_per_beat = tempo;
+        chart_.tempos = {{0, tempo}};
+        modified_ = chart_modified_ = true;
+    }
+    return true;
+}
+
+void SongEditor::set_label(const std::string &label) {
+    if (valid_label_key(label) && entry_.cassette_label != label) {
+        entry_.cassette_label = label;
+        modified_ = true;
+    }
 }
 
 std::string SongEditor::field(unsigned field) const {
@@ -304,6 +377,11 @@ bool SongEdits::open(const SongEntry &entry, SongChart &chart, std::string &erro
     return load_song_chart(entry.midi.c_str(), chart, error, allow_empty);
 }
 
+const std::vector<uint8_t> *SongEdits::midi_override(const SongEntry &entry) const {
+    const auto edit = entries_.find(entry.midi);
+    return edit == entries_.end() ? nullptr : &edit->second.midi;
+}
+
 bool SongEdits::has_playable_edit(const SongEntry &entry) const {
     const auto edit = entries_.find(entry.midi);
     return edit != entries_.end() && edit->second.playable;
@@ -319,11 +397,21 @@ void SongEdits::update_metadata(SongEntry &entry) const {
     entry.artist = edit.artist;
     entry.delay_ms = edit.delay_ms;
     entry.cassette_color = edit.color;
+    entry.cassette_label = edit.label;
 }
 
 SongEdits::SaveResult SongEdits::save(const SongEditor &editor, std::string &message) {
     const auto &source = editor.entry();
-    auto midi = editor.midi();
+    std::vector<uint8_t> midi;
+    if (editor.chart_changed()) {
+        midi = editor.midi();
+    } else if (const auto previous = entries_.find(source.midi); previous != entries_.end()) {
+        midi = previous->second.midi;
+    } else if (source.blank_chart) {
+        midi = editor.midi();
+    } else if (!load_song_midi(source.midi.c_str(), midi, message)) {
+        return SaveResult::failed;
+    }
     SongChart saved_chart;
     if (!parse_song_midi(midi, saved_chart, message, true)) {
         return SaveResult::failed;
@@ -332,6 +420,7 @@ SongEdits::SaveResult SongEdits::save(const SongEditor &editor, std::string &mes
     edit.midi = std::move(midi);
     edit.title = source.title;
     edit.artist = source.artist;
+    edit.label = source.cassette_label;
     edit.delay_ms = source.delay_ms;
     edit.color = source.cassette_color;
     edit.playable = has_guitar_notes(saved_chart);

@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "records.hpp"
+#include "utf8.hpp"
 
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <iterator>
 #include <memory>
 #include <dc/maple.h>
 #include <dc/vmu_pkg.h>
@@ -17,11 +19,17 @@ namespace {
 
 constexpr char app_id[] = "FRETS ON FIRE";
 constexpr const char *filenames[] = {"FOF3_SCORES0", "FOF3_SCORES1"};
-constexpr uint8_t signature[] = {'F', 'O', 'F', 1};
+constexpr uint8_t signature[] = {'F', 'O', 'F', 2};
 constexpr size_t max_payload = 48 * 1024;
+constexpr size_t max_disc_payload = 512 * 1024;
 constexpr size_t max_scores = 5;
 
 using SaveStatus = ScoreBook::SaveStatus;
+
+bool valid_signature(const uint8_t *data) {
+    return std::memcmp(data, signature, sizeof(signature) - 1) == 0 &&
+           (data[3] == 1 || data[3] == signature[3]);
+}
 
 struct Snapshot {
     std::vector<uint8_t> data;
@@ -102,7 +110,7 @@ Snapshot read_slot(maple_device_t *device, int slot) {
     }
     vmu_pkg_t package{};
     if (vmu_pkg_parse(static_cast<uint8_t *>(raw), size, &package) ||
-        std::memcmp(package.data, signature, sizeof(signature)) != 0) {
+        !valid_signature(package.data)) {
         return {};
     }
     Reader reader(package.data + sizeof(signature), package.data_len - sizeof(signature));
@@ -158,10 +166,77 @@ void ScoreBook::load() {
     }
 }
 
+void ScoreBook::load_disc(const char *path) {
+    std::unique_ptr<FILE, decltype(&std::fclose)> file(std::fopen(path, "rb"), &std::fclose);
+    if (!file || std::fseek(file.get(), 0, SEEK_END) != 0) {
+        return;
+    }
+    const long size = std::ftell(file.get());
+    if (size < long(sizeof(signature) + 4) || size > long(max_disc_payload) ||
+        std::fseek(file.get(), 0, SEEK_SET) != 0) {
+        return;
+    }
+    std::vector<uint8_t> data(size);
+    std::string unused;
+    if (std::fread(data.data(), 1, data.size(), file.get()) != data.size() ||
+        !decode(data.data(), data.size(), disc_songs_, unused)) {
+        std::puts("FoFDC: invalid classic score catalog");
+        return;
+    }
+    for (const auto &entry : disc_songs_) {
+        for (unsigned difficulty = 0; difficulty < entry.second.size(); ++difficulty) {
+            merge_disc_scores(entry.first, difficulty);
+        }
+    }
+    std::printf("FoFDC: loaded classic score tables from disc songs=%u\n", unsigned(disc_songs_.size()));
+}
+
+void ScoreBook::merge_disc_scores(const std::string &song, unsigned difficulty) {
+    const auto loaded = disc_songs_.find(song);
+    if (loaded == disc_songs_.end()) {
+        return;
+    }
+    const auto &disc = loaded->second[difficulty];
+    auto &target = combined_scores_[song][difficulty];
+    const auto local = songs_.find(song);
+    if (local == songs_.end()) {
+        target = disc;
+        return;
+    }
+    const auto &saved = local->second[difficulty];
+    target.clear();
+    std::merge(saved.begin(), saved.end(), disc.begin(), disc.end(), std::back_inserter(target),
+               [](const Score &a, const Score &b) { return a.points > b.points; });
+    if (target.size() > max_scores) {
+        target.resize(max_scores);
+    }
+}
+
+void ScoreBook::use_chart(const std::string &song, const std::string &edit_key) {
+    if (edit_key.empty()) {
+        chart_keys_.erase(song);
+    } else {
+        chart_keys_[song] = edit_key;
+    }
+}
+
+const std::string &ScoreBook::chart_key(const std::string &song) const {
+    const auto chart = chart_keys_.find(song);
+    return chart == chart_keys_.end() ? song : chart->second;
+}
+
 const ScoreBook::Table &ScoreBook::table(const std::string &song, unsigned difficulty) const {
-    const auto it = songs_.find(song);
     static const Table empty;
-    return it != songs_.end() && difficulty < it->second.size() ? it->second[difficulty] : empty;
+    if (difficulty >= 4) {
+        return empty;
+    }
+    const auto &key = chart_key(song);
+    const auto combined = combined_scores_.find(key);
+    if (combined != combined_scores_.end()) {
+        return combined->second[difficulty];
+    }
+    const auto it = songs_.find(key);
+    return it != songs_.end() ? it->second[difficulty] : empty;
 }
 
 bool ScoreBook::qualifies(const std::string &song, unsigned difficulty, uint32_t points) const {
@@ -174,11 +249,13 @@ int ScoreBook::add(const std::string &song, unsigned difficulty, uint32_t points
     if (!qualifies(song, difficulty, points)) {
         return -1;
     }
-    if (!name.empty()) {
-        name_ = name.substr(0, max_name);
+    const auto length = utf8::prefix(name, max_name, max_name_bytes);
+    if (length) {
+        name_ = name.substr(0, length);
     }
 
-    auto &scores = songs_[song][difficulty];
+    const auto &key = chart_key(song);
+    auto &scores = songs_[key][difficulty];
     const auto rating = static_cast<uint8_t>(std::min(5u, stars));
     const auto insertion = std::find_if(scores.begin(), scores.end(),
                                         [points](const Score &score) { return score.points < points; });
@@ -186,29 +263,37 @@ int ScoreBook::add(const std::string &song, unsigned difficulty, uint32_t points
     if (scores.size() > max_scores) {
         scores.pop_back();
     }
-    const auto rank = std::find_if(scores.begin(), scores.end(), [&](const Score &score) {
+    merge_disc_scores(key, difficulty);
+    const auto &ranked = table(song, difficulty);
+    const auto rank = std::find_if(ranked.begin(), ranked.end(), [&](const Score &score) {
         return score.points == points && score.stars == rating && score.name == name_;
     });
+    const auto position = rank - ranked.begin();
 
     dirty_ = true;
     if (!writer_) {
         start_write();
     }
     std::printf("FoFDC: high score rank=%u difficulty=%u score=%lu stars=%u name=\"%s\"\n",
-                unsigned(rank - scores.begin() + 1), difficulty, static_cast<unsigned long>(points),
+                unsigned(position + 1), difficulty, static_cast<unsigned long>(points),
                 unsigned(rating), name_.c_str());
-    return static_cast<int>(rank - scores.begin());
+    return static_cast<int>(position);
 }
 
 bool ScoreBook::decode(const uint8_t *data, size_t size, Songs &songs, std::string &name) {
     constexpr size_t header_size = sizeof(signature) + 4;
-    if (size < header_size) {
+    if (size < header_size || !valid_signature(data)) {
         return false;
     }
     Reader reader(data + header_size, size - header_size);
+    const bool legacy = data[3] == 1;
+    const auto read_name = [&](std::string &value) {
+        return reader.text(value, legacy ? max_name : max_name_bytes, legacy) &&
+               utf8::prefix(value, max_name, max_name_bytes) == value.size();
+    };
     std::string player_name;
     uint32_t song_count;
-    if (!reader.text(player_name, max_name) || !reader.number(song_count, 2) ||
+    if (!read_name(player_name) || !reader.number(song_count, 2) ||
         song_count > reader.remaining() / 6) {
         return false;
     }
@@ -232,7 +317,7 @@ bool ScoreBook::decode(const uint8_t *data, size_t size, Songs &songs, std::stri
                 Score score{};
                 uint32_t stars;
                 if (!reader.number(score.points, 4) || !reader.number(stars, 1) || stars > 5 ||
-                    !reader.text(score.name, max_name) ||
+                    !read_name(score.name) ||
                     (j && scores.back().points < score.points)) {
                     return false;
                 }

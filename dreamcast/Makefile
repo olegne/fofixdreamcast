@@ -3,6 +3,7 @@ SOURCES = src/main.cpp src/audio.cpp src/chart.cpp src/song_library.cpp src/view
 SOURCES += src/credits.cpp src/records.cpp src/settings.cpp
 SOURCES += src/language.cpp src/chooser.cpp
 SOURCES += src/editor.cpp src/editor_vmu.cpp
+SOURCES += src/ranking.cpp src/ranking_wire.cpp
 OBJECTS = $(SOURCES:.cpp=.o) romdisk.o
 KOS_ROMDISK_DIR = build/romdisk
 CXXFLAGS += -std=c++17 -Wall -Wextra -MMD -MP
@@ -30,15 +31,24 @@ build/assets.stamp: tools/prepare_assets.py tools/prepare_classic_sounds.py tool
 SONGS_DIR ?= $(CLASSIC_DATA)/songs
 # Optional prepared Ogg files used as sources by the editor.
 IMPORT_DIR ?=
+# Optional PNG images selectable in the editor's Set Cassette Label dialog.
+LABEL_DIR ?=
+# Optional text file containing a compatible HTTP ranking endpoint.
+RANKING_URL_FILE ?=
 
 cdi: $(TARGET)
 	test -d "$(SONGS_DIR)"
 	test -z "$(IMPORT_DIR)" || test -d "$(IMPORT_DIR)"
-	rm -rf build/cd/songs build/cd/imports
+	test -z "$(LABEL_DIR)" || test -d "$(LABEL_DIR)"
+	test -z "$(RANKING_URL_FILE)" || test -f "$(RANKING_URL_FILE)"
+	rm -rf build/cd/songs build/cd/imports build/cd/labels
+	rm -f build/cd/ranking.url
 	mkdir -p build/cd/songs
 	cp -R "$(SONGS_DIR)/." build/cd/songs/
 	@if test -n "$(IMPORT_DIR)"; then mkdir -p build/cd/imports && cp -R "$(IMPORT_DIR)/." build/cd/imports/; fi
-	PYTHONDONTWRITEBYTECODE=1 python3 tools/prepare_labels.py "$(CLASSIC_DATA)/songs" build/cd
+	@if test -n "$(RANKING_URL_FILE)"; then cp "$(RANKING_URL_FILE)" build/cd/ranking.url; fi
+	PYTHONDONTWRITEBYTECODE=1 python3 tools/prepare_labels.py "$(CLASSIC_DATA)/songs" build/cd --choices "$(LABEL_DIR)"
+	PYTHONDONTWRITEBYTECODE=1 python3 tools/prepare_scores.py build/cd
 	mkdcdisc -e $(TARGET) -o $(TARGET:.elf=.cdi) -n "Frets on Fire Dreamcast" -N -D build/cd
 
 clean:

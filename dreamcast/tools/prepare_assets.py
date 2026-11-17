@@ -15,7 +15,7 @@ from collada import Collada
 from collada.common import DaeBrokenRefError
 
 from prepare_classic_sounds import sounds
-from prepare_locale import locales, pack_texture, pack_texture
+from prepare_locale import glyph_metrics, locales, pack_texture
 
 
 TEXTURES = {
@@ -51,26 +51,27 @@ TEXTURES = {
 }
 
 
-def texture(image, path, solid=False, dither_opaque=False):
+def texture(image, path, solid=False, dither_opaque=False, dither_alpha=False):
     width, height = image.size
     if solid:
         pixels = iter(image.convert("RGB").tobytes())
         words = array.array("H", (((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
                                   for r, g, b in zip(pixels, pixels, pixels)))
-    elif dither_opaque:
-        # Keep the transparent edges unchanged. Dither gradients on the
-        # solid face of tutorial keys before storing ARGB4444.
+    elif dither_opaque or dither_alpha:
+        # Retain smooth gradients on the keys and in the translucent stage art
+        # without allocating more texture memory for ARGB4444.
         bayer = ((0, 8, 2, 10), (12, 4, 14, 6), (3, 11, 1, 9), (15, 7, 13, 5))
         pixels = iter(image.convert("RGBA").tobytes())
         words = array.array("H")
         for index, (r, g, b, a) in enumerate(zip(pixels, pixels, pixels, pixels)):
-            if a == 255:
-                rank = bayer[(index // width) % 4][index % 4]
-                offset = (2 * rank + 1) * 17 // 32
+            rank = bayer[(index // width) % 4][index % 4]
+            offset = (2 * rank + 1) * 17 // 32
+            if dither_opaque and a == 255:
                 r, g, b = ((component + offset) // 17 for component in (r, g, b))
             else:
                 r, g, b = r >> 4, g >> 4, b >> 4
-            words.append(((a >> 4) << 12) | (r << 8) | (g << 4) | b)
+            alpha = (a + offset) // 17 if dither_alpha else a >> 4
+            words.append((alpha << 12) | (r << 8) | (g << 4) | b)
     else:
         pixels = iter(image.convert("RGBA").tobytes())
         words = array.array("H", (((a >> 4) << 12) | ((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4)
@@ -105,20 +106,25 @@ def light_graphics_stage(data, out):
             bounds = (width / 2 - 352 / scale, height / 2 - 272 / scale,
                       width / 2 + 352 / scale, height / 2 + 272 / scale)
             image = src.convert("RGBA").resize((256, 256), Image.Resampling.LANCZOS, box=bounds)
-        pack_texture(image, out / f"light-graphics-flame{number}.tex", texture)
+        pack_texture(image, out / f"light-graphics-flame{number}.tex",
+                     lambda atlas, path: texture(atlas, path, dither_alpha=True))
 
 
 def font_atlas(source, out, name):
-    font = ImageFont.truetype(str(source), 25)
+    font = ImageFont.truetype(str(source), 22, layout_engine=ImageFont.Layout.BASIC)
     alpha = Image.new("L", (512, 256))
     widths = bytearray()
     for index, glyph in enumerate(map(chr, range(32, 127))):
         x = (index % 16) * 32
-        y = (index // 16) * 36
-        cell = Image.new("L", (32, 36))
-        ImageDraw.Draw(cell).text((2, 26), glyph, font=font, fill=255, anchor="ls")
+        y = (index // 16) * 40
+        width, overhang = glyph_metrics(font, glyph)
+        if width + 4 > 32:
+            raise ValueError(f"Default font glyph exceeds its cell: {glyph}")
+        cell = Image.new("L", (32, 40))
+        ImageDraw.Draw(cell).text((2 + overhang, 2 + font.getmetrics()[0]),
+                                  glyph, font=font, fill=255, anchor="ls")
         alpha.paste(cell, (x, y))
-        widths.append(round(font.getlength(glyph)))
+        widths.append(width)
     atlas = Image.new("RGBA", alpha.size, (255, 255, 255, 0))
     atlas.putalpha(alpha)
     texture(atlas, out / (name + ".tex"))
@@ -127,17 +133,16 @@ def font_atlas(source, out, name):
 
 def title_numbers(source, out):
     # Data.py opens title.ttf at 108 px. Only countdown and score use it.
-    font = ImageFont.truetype(str(source), 108)
+    font = ImageFont.truetype(str(source), 108, layout_engine=ImageFont.Layout.BASIC)
     baseline = font.getmetrics()[0]
     alpha = Image.new("L", (512, 128))
     painter = ImageDraw.Draw(alpha)
     widths = bytearray()
     for index, glyph in enumerate("0123456789"):
-        left, _, right, _ = font.getbbox(glyph, anchor="ls")
-        left = min(0, left)
+        width, overhang = glyph_metrics(font, glyph)
         x = 48 * index + 2  # transparent padding keeps bilinear sampling within the glyph
-        painter.text((x - left, baseline), glyph, font=font, fill=255, anchor="ls")
-        widths.append(max(right, round(font.getlength(glyph))) - left)
+        painter.text((x + overhang, baseline), glyph, font=font, fill=255, anchor="ls")
+        widths.append(width)
     atlas = Image.new("RGBA", alpha.size, (255, 255, 255, 0))
     atlas.putalpha(alpha)
     texture(atlas, out / "title-font.tex")
@@ -317,7 +322,8 @@ def main(data, out):
         if name in ("stage-beam", "glow"):
             additive_light_texture(scaled, destination)
         else:
-            texture(scaled, destination, dither_opaque=name in ("tutorial-keyboard", "tutorial-escape"))
+            texture(scaled, destination, dither_opaque=name in ("tutorial-keyboard", "tutorial-escape"),
+                    dither_alpha=name.startswith("stage-"))
 
     # The center 640x480 of stage.ini's 1.3x backdrop fills the viewport.
     with Image.open(data / "stage_background.png") as src:

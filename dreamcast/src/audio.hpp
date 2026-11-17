@@ -38,6 +38,8 @@ public:
     void stop();
     void set_mix(unsigned guitar, unsigned song, unsigned rhythm);
     void guitar_gain(float gate, bool picked = false);
+    void restore_backing_gain();
+    unsigned backing_level() const;
     void fade_out(unsigned duration_ms);
 
     int position_ms() const;
@@ -51,7 +53,30 @@ private:
     static constexpr unsigned block_frames = 2048;
     static constexpr unsigned blocks = 8;
     static constexpr unsigned ring_frames = block_frames * blocks;
+    static constexpr unsigned sample_rate = 44100;
+    static constexpr unsigned max_source_rate = 48000;
     friend class AudioClip;
+
+    struct Resampler {
+        static constexpr unsigned taps = 24;
+        static constexpr unsigned left = taps / 2 - 1;
+        static constexpr unsigned phases = 128;
+        static constexpr unsigned source_capacity =
+            ((block_frames - 1) * max_source_rate + sample_rate - 1) / sample_rate + taps;
+
+        Resampler(unsigned source_rate, unsigned frames);
+
+        const unsigned rate;
+        const unsigned source_frames;
+        const unsigned step;
+        const unsigned step_remainder;
+        unsigned position = 0;
+        unsigned phase = 0;
+        unsigned buffered = 0;
+        int window_start = -static_cast<int>(left);
+        int16_t coefficients[phases + 1][taps];
+        int16_t source[source_capacity * 2];
+    };
 
     struct Stem {
         OggVorbis_File decoder{};
@@ -61,6 +86,7 @@ private:
         const AudioClip *clip = nullptr;
         int channel[2] = {-1, -1};
         uint32_t address[2] = {};
+        std::unique_ptr<Resampler> resampler;
         unsigned channels = 0;
         unsigned frames = 0;
         unsigned decoded = 0;
@@ -71,6 +97,8 @@ private:
     bool open(Stem &stem, const char *path, PrepareService service);
     bool allocate_channels(Stem &stem);
     static void close_stem(Stem &stem);
+    static bool seek(Stem &stem, unsigned frame);
+    bool resample(Stem &stem, unsigned count);
     bool decode(Stem &stem, unsigned count);
     bool fill(Stem &stem, unsigned block);
     void begin_stream(unsigned position);
@@ -88,7 +116,6 @@ private:
     bool paused_ = false;
     bool clock_ready_ = false;
     bool prepared_ = false;
-    unsigned rate_ = 0;
     unsigned length_frames_ = 0;
     unsigned played_frames_ = 0;
     unsigned ring_origin_ = 0;

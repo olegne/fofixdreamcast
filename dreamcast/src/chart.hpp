@@ -31,6 +31,9 @@ struct Beat {
 struct TempoPoint {
     int time_ms;
     unsigned us_per_beat;
+    uint16_t time_us_remainder = 0;
+
+    float position_ms() const { return time_ms + 0.001f * time_us_remainder; }
 };
 
 struct SongChart {
@@ -42,6 +45,7 @@ struct SongChart {
     unsigned us_per_beat(int time_ms) const;
 };
 
+bool load_song_midi(const char *path, std::vector<uint8_t> &bytes, std::string &error);
 bool load_song_chart(const char *path, SongChart &song, std::string &error,
                      bool allow_empty = false);
 bool parse_song_midi(const std::vector<uint8_t> &bytes, SongChart &song, std::string &error,

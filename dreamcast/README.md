@@ -17,6 +17,27 @@ O jogo começa pelo menu principal. Em **Play Game**, selecione a biblioteca, a 
 
 Depois do resultado, **Enter** ou **F1** avança. Se a pontuação entrar entre as cinco melhores daquela faixa e dificuldade, digite o nome e confirme com **Enter** ou **F1**. **Esc** mantém o nome anterior. Depois escolha **Replay**, **Change Song** ou **Quit to Main Menu**. O jogo grava a tabela na primeira VMU disponível. No teste em Flycast, o teclado ficou na porta A e a VMU no primeiro slot do controle da porta B.
 
+## Nomes e recordes
+
+O teclado Maple aceita caracteres acentuados conforme o mapa regional. Com o teclado identificado como US, segure **Alt direito** e pressione uma combinação da tabela. Solte as teclas e digite a letra. Use Shift na letra para obter a versão maiúscula. **Backspace** apaga um caractere inteiro.
+
+| Acento | Tecla com Alt direito |
+| --- | --- |
+| Agudo | Apóstrofo |
+| Grave | Crase |
+| Til | Shift + crase |
+| Circunflexo | 6 |
+| Trema | Shift + apóstrofo |
+| Cedilha | Vírgula |
+
+Para trazer os recordes do Linux, compile a CDI com a sua biblioteca de músicas em `SONGS_DIR`, incluindo os arquivos `song.ini` do seu perfil Frets on Fire. A compilação valida os registros do 1.3.110 e inclui as tabelas no disco. Na seleção de músicas e no resultado, o jogo combina essas tabelas com as pontuações locais da VMU. A gravação local usa UTF-8 e lê os saves antigos. Uma edição que muda o MIDI recebe tabela própria. Alterações de nome, capa ou atraso mantêm a tabela do mesmo MIDI.
+
+### Ranking online
+
+Em **Settings → Game Settings → Upload Highscores**, altere **No** para **Yes** para enviar as tabelas de recordes da faixa após um novo recorde elegível. A opção começa desligada e é gravada na VMU. O envio roda em segundo plano e mostra o resultado na tela de recordes. O identificador da faixa usa o SHA-1 do MIDI em execução, inclusive se foi salvo no editor.
+
+O cliente usa IPv4 com a pilha de rede do KallistiOS e requer um adaptador de rede compatível no Dreamcast. Na configuração padrão, o URL é o mesmo do Frets on Fire 1.3.110 no Linux. A disponibilidade desse servidor segue sem confirmação. Para usar um servidor HTTP compatível na sua rede, grave o endereço em uma linha de um arquivo de texto e passe `RANKING_URL_FILE=/caminho/ranking.url` ao compilar a CDI. Um endereço de exemplo é `http://192.168.1.20:8080/play`. O cliente envia o GET clássico com o nome de diretório da faixa, o SHA-1 do MIDI, a versão e os recordes Cerealizer. O teste no Flycast usou um servidor local e BBA emulado.
+
 ## Compilação
 
 Requisitos do port. KallistiOS 2.2.1, SH4ZAM, libvorbis, libogg e zlib em kos-ports, mkdcdisc, Python 3 com Pillow e pycollada.
@@ -44,6 +65,18 @@ make -C dreamcast cdi CLASSIC_DATA="/caminho/Frets on Fire-1.3.110/data" \
 ```
 
 Abra **Song Editor** e escolha a faixa importada. O editor grava o chart na VMU e lê o áudio da CDI. Para preparar uma faixa com chart existente, passe `--notes /caminho/notes.mid` e use a biblioteca gerada com `SONGS_DIR`.
+
+### Capas do editor
+
+Na edição de uma música, pressione Esc e abra **Set Cassette Label**. O seletor mostra os três rótulos originais e as imagens adicionais incluídas na compilação. Escolha **Original cassette label** para restaurar o rótulo da faixa. Use **Save Song** para manter a escolha na VMU.
+
+Para incluir imagens próprias, coloque os PNGs em uma pasta e indique-a por `LABEL_DIR` ao compilar a CDI. Use imagens de 256 × 128 e nomes de até 48 caracteres com letras ASCII, números, espaços, hífens ou sublinhados.
+
+```sh
+make -C dreamcast cdi CLASSIC_DATA="/caminho/data" LABEL_DIR="/caminho/capas"
+```
+
+A VMU guarda a referência à imagem convertida. Leve o PNG com o mesmo nome ao remontar a CDI. Quando a imagem escolhida estiver ausente, a fita volta a exibir o rótulo original.
 
 Para usar uma etiqueta própria no seletor, coloque `label.png` na pasta da música ou na pasta da biblioteca. A compilação da CDI prepara a textura que o seletor usa na fita ou na caixa.
 

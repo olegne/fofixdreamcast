@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "view.hpp"
+#include "chooser.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -26,8 +27,7 @@ constexpr float left_edge = 2.0f;
 constexpr float right_edge = -2.0f;
 constexpr float focus = 415.6922f;
 constexpr float menu_depth = 5.0f;
-constexpr float main_font = 1.1264f;  // default.ttf at 22 px times .002 * 640 / atlas size
-constexpr float title_font_height = 133.0f;  // SDL_ttf's title.ttf at 108 px
+constexpr float main_font = 1.28f;    // Font.render default scale .002 at 640 logical pixels.
 constexpr float menu_y = 198.4f;      // Classic menu.pos.y is 0.31 of the logical width
 constexpr float menu_line = 45.0f;    // Classic default.ttf's line pitch at 640 × 480
 constexpr float matrix_pi = 3.14159265358979323846f;
@@ -238,6 +238,7 @@ bool View::init() {
     pvr_poly_compile(&glow_header_, &context);
     return file_bytes("/rd/theme/font.map", widths_.data(), widths_.size()) &&
            file_bytes("/rd/theme/title-font.map", digit_widths_.data(), digit_widths_.size()) &&
+           prepare_international_font() &&
            prepare_cassette_mesh("/rd/theme/cassette-shell.mesh", cassette_shell_) &&
            prepare_cassette_mesh("/rd/theme/cassette-reels.mesh", cassette_reels_) &&
            prepare_cassette_mesh("/rd/theme/library-shell.mesh", library_shell_) &&
@@ -334,21 +335,18 @@ bool View::prepare_note_mesh(const char *name, NoteMesh &mesh) {
     return ok;
 }
 
-void View::reset_effects() {
+void View::reset_effects(bool same_scene) {
     recent_lanes_.fill(0);
     beat_lanes_.fill(0);
     recent_pick_count_ = 0;
     beat_lane_count_ = 1;
-    stage_bpm_ = 50.0f;
-    stage_target_bpm_ = 50.0f;
-    stage_beat_period_ = 1200.0f;
-    stage_tempo_ = 0;
-    stage_beat_ = 0;
-    last_stage_beat_ms_ = -1;
+    guitar_clock_.restart(same_scene);
     last_multiplier_ms_ = -1;
-    guitar_time_origin_ms_ = fret_time_ms_ = timer_ms_gettime64();
-    fret_weights_.fill(0);
-    fret_activities_.fill(0);
+    if (!same_scene) {
+        guitar_time_origin_ms_ = fret_time_ms_ = timer_ms_gettime64();
+        fret_weights_.fill(0);
+        fret_activities_.fill(0);
+    }
 }
 
 void View::record_pick(const Round &round, bool after_stage_update) {
@@ -475,28 +473,27 @@ void View::apply_mods(unsigned flags) {
     active_mods_ = flags;
 }
 
+bool View::prepare_international_font() {
+    static_assert(sizeof(Glyph) == 12);
+    auto *file = std::fopen("/rd/theme/font-intl.map", "rb");
+    if (!file) {
+        return false;
+    }
+    Glyph glyph;
+    while (std::fread(&glyph, sizeof(glyph), 1, file) == 1) {
+        international_glyphs_.push_back(glyph);
+    }
+    std::fclose(file);
+    return !international_glyphs_.empty() && load_texture(font_intl, "font-intl", false);
+}
+
 void View::select_language(unsigned index) {
     language_.select(index);
-    if (!language_.international() || international_font_loaded_) {
+    if (!language_.international() || international_title_loaded_) {
         return;
     }
-    static_assert(sizeof(Glyph) == 12);
-    if (international_glyphs_.empty()) {
-        if (auto *file = std::fopen("/rd/theme/font-intl.map", "rb")) {
-            Glyph glyph;
-            while (std::fread(&glyph, sizeof(glyph), 1, file) == 1) {
-                international_glyphs_.push_back(glyph);
-            }
-            std::fclose(file);
-        }
-    }
-    const bool normal = textures_[font_intl].memory || load_texture(font_intl, "font-intl", false);
-    const bool title = textures_[title_intl].memory || load_texture(title_intl, "title-intl", false);
-    international_font_loaded_ = normal && title && !international_glyphs_.empty() &&
+    international_title_loaded_ = load_texture(title_intl, "title-intl", false) &&
         file_bytes("/rd/theme/title-intl.map", international_digits_.data(), international_digits_.size());
-    if (!international_font_loaded_) {
-        language_.select(0);
-    }
 }
 
 static uint32_t next_codepoint(const char *&text) {
@@ -522,51 +519,92 @@ static uint32_t next_codepoint(const char *&text) {
     return cp;
 }
 
-View::Glyph View::glyph_for(uint32_t cp) const {
-    if (language_.international()) {
+View::Glyph View::glyph_for(uint32_t cp, bool &intl) const {
+    intl = language_.international() || cp >= 127;
+    if (intl) {
         const auto find = [&](uint32_t value) {
             return std::lower_bound(international_glyphs_.begin(), international_glyphs_.end(), value,
                 [](const Glyph &glyph, uint32_t target) { return glyph.codepoint < target; });
         };
         const auto glyph = find(cp);
-        return glyph != international_glyphs_.end() && glyph->codepoint == cp ? *glyph : *find('?');
+        if (glyph != international_glyphs_.end() && glyph->codepoint == cp) {
+            return *glyph;
+        }
+        if (language_.international()) {
+            return *find('?');
+        }
+        intl = false;
     }
     const auto i = cp >= 32 && cp < 127 ? cp - 32 : '?' - 32;
-    return {cp, static_cast<uint16_t>((i % 16) * 32), static_cast<uint16_t>((i / 16) * 36),
-            32, widths_[i], 0};
+    return {cp, static_cast<uint16_t>((i % 16) * 32), static_cast<uint16_t>((i / 16) * 40),
+            static_cast<uint8_t>(widths_[i] + 4), widths_[i]};
+}
+
+float View::font_height() const {
+    return language_.international() ? 27.0f : 35.0f;
+}
+
+float View::big_font_height() const {
+    return language_.international() && international_title_loaded_ ? 127.0f : 133.0f;
 }
 
 unsigned View::text_width(const char *line) const {
     unsigned width = 0;
     while (*line) {
-        width += glyph_for(next_codepoint(line)).advance;
+        bool intl;
+        width += glyph_for(next_codepoint(line), intl).advance;
     }
     return width;
 }
 
 void View::text(float x, float y, const char *line, float size, uint32_t color, bool centered,
-                float depth_offset) {
+                float depth_offset, float angle) {
     size *= text_scale_;
     if (centered) {
         x -= 0.5f * size * text_width(line);
     }
 
     const float depth = menu_depth + 1 + depth_offset;
-    text_line(x + 1.9f, y + 1.9f, line, size, color & 0xff000000, depth);
-    text_line(x, y, line, size, color, depth);
+    const auto rotation = angle ? shz_sincosf(angle) : shz_sincos_t{0.0f, 1.0f};
+    text_line(x + 1.92f, y + 1.92f, line, size, color & 0xff000000, depth,
+              rotation.sin, rotation.cos);
+    text_line(x, y, line, size, color, depth, rotation.sin, rotation.cos);
 }
 
-void View::text_line(float x, float y, const char *line, float size, uint32_t color, float depth) {
-    const bool intl = language_.international();
-    const auto id = intl ? font_intl : font;
-    const float row_size = intl ? 512.0f : 256.0f;
+void View::text_line(float x, float y, const char *line, float size, uint32_t color,
+                     float depth, float sin, float cos) {
     const auto render = [&](uint32_t cp) {
-        const auto glyph = glyph_for(cp);
+        bool intl;
+        const auto glyph = glyph_for(cp, intl);
         if (cp != ' ') {
-            const float left = x + (glyph.left - 2.0f) * size;
-            sprite(id, left, y, glyph.width * size, 36.0f * size, depth,
-                   glyph.x / 512.0f, glyph.y / row_size,
-                   (glyph.x + glyph.width) / 512.0f, (glyph.y + 36.0f) / row_size, color);
+            const auto id = intl ? font_intl : font;
+            const float row_size = intl ? 512.0f : 256.0f;
+            const float glyph_height = intl ? 31.0f : 39.0f;
+            const float left = x - 2.0f * size;
+            // Accented text may use the international atlas inside an English line.
+            const float top = y + (intl && !language_.international() ? 2.0f : -2.0f) * size;
+            const float u0 = glyph.x / 512.0f;
+            const float v0 = glyph.y / row_size;
+            const float u1 = (glyph.x + glyph.width) / 512.0f;
+            const float v1 = (glyph.y + glyph_height) / row_size;
+            const float width = glyph.width * size;
+            const float height = glyph_height * size;
+            if (sin == 0.0f) {
+                sprite(id, left, top, width, height, depth, u0, v0, u1, v1, color);
+            } else {
+                material(textures_[id].header);
+                const auto vertex = [&](float a, float b, float u, float v, uint32_t flags) {
+                    return pvr_vertex_t{flags, a * cos - b * sin, a * sin + b * cos,
+                                        depth, u, v, color, 0};
+                };
+                const pvr_vertex_t quad[] = {
+                    vertex(left, top, u0, v0, PVR_CMD_VERTEX),
+                    vertex(left + width, top, u1, v0, PVR_CMD_VERTEX),
+                    vertex(left, top + height, u0, v1, PVR_CMD_VERTEX),
+                    vertex(left + width, top + height, u1, v1, PVR_CMD_VERTEX_EOL)
+                };
+                pvr_prim(quad, sizeof(quad));
+            }
         }
         x += size * glyph.advance;
     };
@@ -585,18 +623,19 @@ void View::text_line(float x, float y, const char *line, float size, uint32_t co
     }
 }
 
-void View::title_number(float y, const char *digits, float size, uint32_t color) {
+void View::title_number(float y, const char *digits, float size, uint32_t color, float centering_size) {
     if (y >= 480.0f) {
         return;
     }
+    const float center = (centering_size > 0 ? centering_size : size) * text_scale_;
     size *= text_scale_;
-    const bool intl = language_.international();
+    const bool intl = language_.international() && international_title_loaded_;
     const auto &widths = intl ? international_digits_ : digit_widths_;
     const float atlas = intl ? 1024.0f : 512.0f;
     const unsigned cell = intl ? 96 : 48;
     float left = 320.0f;
     for (const char *digit = digits; *digit; ++digit) {
-        left -= 0.5f * size * widths[*digit - '0'];
+        left -= 0.5f * center * widths[*digit - '0'];
     }
     const auto line = [&](float x, float top, uint32_t ink) {
         for (const char *digit = digits; *digit; ++digit) {
@@ -725,9 +764,10 @@ void View::draw_tail_wave(unsigned lane, const Chord &note, int position_ms, flo
     }
 }
 
-void View::world(const Frame &f, const SongChart &song, const Round &round, const Chart &chart,
-                 float period_ms) {
-    const float scroll = std::fmod(-0.5f * board_z(f.time_ms, period_ms), 1.0f);
+void View::world(const Frame &f, const Round &round, const Chart &chart,
+                 const GuitarVisualFrame &timing) {
+    const float period_ms = timing.note_period_ms;
+    const float scroll = std::fmod(-0.5f * timing.scroll_beat * board_length / 5.0f, 1.0f);
     const auto surface = [&](float start, float end, uint32_t back, uint32_t front) {
         board_quad(neck, left_edge, right_edge, 0.0f, start, end,
                    1, scroll - 0.5f * end, 0, scroll - 0.5f * start, back, front);
@@ -740,14 +780,9 @@ void View::world(const Frame &f, const SongChart &song, const Round &round, cons
         board_quad(strings, x + 0.035f, x - 0.035f, 0.003f, -2.0f, board_length,
                    0, 0, 1, 1, yellow, yellow);
     }
-    const auto start = std::lower_bound(song.beats.begin(), song.beats.end(), f.time_ms - int(period_ms),
-                                        [](const Beat &b, int time) { return b.time_ms < time; });
-    for (auto it = start; it != song.beats.end(); ++it) {
-        const float z = board_z(it->time_ms - f.time_ms, period_ms);
-        if (z > board_length) {
-            break;
-        }
-        if (!it->strength || z < -1.0f) {
+    for (int beat = static_cast<int>(timing.grid_beat); beat < timing.grid_beat + 5.0f; ++beat) {
+        const float z = (beat - timing.grid_beat) * board_length / 5.0f;
+        if (z < -1.0f) {
             continue;
         }
         const auto alpha = 0.75f * std::min({1.0f, 1.0f + z, (board_length - z) / 2.4f});
@@ -838,13 +873,9 @@ void View::draw_fret_glows(const Frame &frame, const Chord *held) {
 }
 
 void View::update_stage_beat(int time_ms) {
-    stage_beat_period_ = 60000.0f / stage_bpm_;
-    const int beat = int(4.0f * time_ms / stage_beat_period_) / 4;
-    if (beat <= stage_beat_) {
+    if (!guitar_clock_.advance_stage(time_ms)) {
         return;
     }
-    stage_beat_ = beat;
-    last_stage_beat_ms_ = time_ms;
     if (beat_lane_count_ < beat_lanes_.size()) {
         ++beat_lane_count_;
     } else {
@@ -854,32 +885,13 @@ void View::update_stage_beat(int time_ms) {
     beat_lanes_[beat_lane_count_ - 1] = beat_lanes_[beat_lane_count_ - 2];
 }
 
-void View::update_stage(int time_ms, const SongChart &song) {
-    update_stage_beat(time_ms);
-    // Guitar.run uses the target found in the previous draw. Guitar.renderNotes
-    // then discovers BPM changes, deferring later events until a full beat past them.
-    stage_bpm_ += 0.03f * (stage_target_bpm_ - stage_bpm_);
-    const float period = 60000.0f / stage_bpm_;
-    while (stage_tempo_ < song.tempos.size()) {
-        const auto &tempo = song.tempos[stage_tempo_];
-        const bool same_time = stage_tempo_ && tempo.time_ms == song.tempos[stage_tempo_ - 1].time_ms;
-        if (!same_time) {
-            if (tempo.time_ms >= time_ms + 5.0f * period ||
-                (stage_tempo_ && time_ms - tempo.time_ms <= period)) {
-                break;
-            }
-            stage_target_bpm_ = 60000000.0f / tempo.us_per_beat;
-        }
-        ++stage_tempo_;
-    }
-}
-
 void View::stage_decoration(int time_ms) {
     const auto pulse = [&](float delay) {
-        if (last_stage_beat_ms_ < 0) {
+        if (!guitar_clock_.last_beat_ms()) {
             return 0.0f;
         }
-        const float phase = (time_ms - last_stage_beat_ms_) / stage_beat_period_ - delay;
+        const float phase = (time_ms - guitar_clock_.last_beat_ms()) /
+                            guitar_clock_.stage_period_ms() - delay;
         return 1.0f - std::clamp(phase, 0.0f, 1.0f);
     };
     const auto layer = [&](TextureId id, float px, float py, float w, float h) {
@@ -912,15 +924,17 @@ void View::stage_lights(const Frame &frame, const Round &round) {
     constexpr float miss_period[] = {75.0f, 100.0f, 150.0f, 250.0f, 200.0f, 150.0f};
     const float recent = recent_pick_count_ && round.last_hit_ms ? 1.0f - std::clamp(
         (frame.time_ms - round.last_hit_ms) / 500.0f, 0.0f, 1.0f) : 0.0f;
-    const auto miss = frame.time_ms - round.last_miss_ms;
     for (unsigned i = 0; i < 6; ++i) {
         const unsigned channel = i % 3;
         if (beat_lane_count_ < channel + 2) {
             continue;
         }
         const auto color = tint(lane_color(beat_lanes_[channel], 0.50f + 0.35f * recent), 0.7f);
-        const float phase = std::clamp(miss / miss_period[i], 0.0f, 1.0f);
-        const float impulse = i == 5 ? 1.0f - phase : 1.0f - shz_cosf(matrix_pi * (1.0f - phase));
+        float impulse = 0.0f;
+        if (round.overstrums && round.last_miss_ms) {
+            const float phase = std::clamp((frame.time_ms - round.last_miss_ms) / miss_period[i], 0.0f, 1.0f);
+            impulse = i == 5 ? 1.0f - phase : 1.0f - shz_cosf(matrix_pi * (1.0f - phase));
+        }
         rotated_sprite(stage_beam, 320 + 320 * light_x[i], 240 + 240 * light_y[i],
                        294 * 3, 263 * 3, (light_angle[i] + miss_angle[i] * impulse) * matrix_pi / 180,
                        0.95f, color);
@@ -1024,6 +1038,59 @@ void View::draw_stats(const Frame &frame, const Round &round, const Rules &rules
     }
 }
 
+void View::update_menu_clock(const Frame &frame) {
+    menu_frame_ms_ = timer_ms_gettime64();
+    const auto page = frame.settings_menu && frame.screen == Screen::settings ?
+                      frame.settings_menu->page : SettingsPage::categories;
+    const auto selected = frame.settings_menu && frame.screen == Screen::settings ?
+                          frame.settings_menu->selected : frame.selected;
+    const bool new_menu = frame.screen != menu_screen_ || !menu_enter_ms_ ||
+                          menu_settings_page_ != page || menu_results_actions_ != frame.results_actions;
+    if (new_menu) {
+        menu_enter_ms_ = menu_frame_ms_;
+        const bool main_menu = frame.screen == Screen::menu || frame.screen == Screen::editor_menu ||
+                               (frame.screen == Screen::settings && page != SettingsPage::pause_volume);
+        if (!main_menu) {
+            menu_main_enter_ms_ = 0;
+        } else if (!menu_main_enter_ms_) {
+            menu_main_enter_ms_ = menu_frame_ms_;
+        }
+    }
+    if (new_menu || selected != menu_selected_) {
+        menu_selected_ms_ = menu_frame_ms_;
+    }
+    menu_screen_ = frame.screen;
+    menu_results_actions_ = frame.results_actions;
+    menu_settings_page_ = page;
+    menu_selected_ = selected;
+}
+
+void View::main_menu_art(float phase, float hidden) {
+    const float slide = hidden * hidden;
+    const float cube = slide * slide * slide;
+    rotated_sprite(logo, 320, 96, 572 * (1 + 0.025f * shz_sinf(phase * 16) + cube),
+                   138 * (1 - 0.025f * shz_cosf(phase * 17) - cube), 0, menu_depth);
+    rotated_sprite(menu_pose, 480 + 1280 * slide, 312, 302 * 0.9f, 413 * 0.9f, 0, menu_depth);
+}
+
+void View::menu_item(float x, float y, const char *label, float size, bool selected,
+                     float hidden, float depth_offset) {
+    const float phase = (menu_frame_ms_ - menu_selected_ms_) / 50.0f;
+    const float base_alpha = 1.0f - hidden;
+    const float alpha = selected ? (shz_sinf(phase) * 0.15f + 0.75f) * (1.0f - 2.0f * hidden) :
+                                  base_alpha;
+    if (alpha <= 0.0f) {
+        return;
+    }
+    // Menu.py rotates around the normalized viewport origin, including the shadow.
+    const float offset = selected ? -3.2f * alpha : 0.0f;
+    const float angle = hidden * matrix_pi / 4.0f;
+    const float max_size = (640.0f - x - 24.0f) /
+                           (std::max(1u, text_width(label)) * text_scale_);
+    text(x - 160.0f * hidden + offset, y + offset, label, std::min(size, max_size),
+         tint(selected ? gold : yellow, alpha), false, depth_offset, angle);
+}
+
 void View::menu_backdrop(const Frame &frame) {
     if (frame.screen == Screen::results) {
         const float hidden = 1.0f - std::min(1.0f, frame.results_age_ms / 512.0f);
@@ -1034,8 +1101,6 @@ void View::menu_backdrop(const Frame &frame) {
                        240 - 120 * shz_sinf(t), 958 * zoom, 272 * zoom, t, 0.01f);
         return;
     }
-    const float phase = (timer_ms_gettime64() % 251327) / 5000.0f;
-    const float zoom = shz_sinf(phase / 8) + 2;
     if (frame.screen == Screen::setlist) {
         const float age = cassette_frame_ms_ ? cassette_frame_ms_ - cassette_enter_ms_ : 0;
         const float t = age / 5000.0f;
@@ -1044,12 +1109,20 @@ void View::menu_backdrop(const Frame &frame) {
         rotated_sprite(cassette_bg, 320 + 1280 * hidden * hidden + 160 * shz_sinf(t / 2),
                        240 - 120 * shz_cosf(t), 350 * scale, 223 * scale, t, 0.01f);
     } else if (frame.screen == Screen::difficulty || frame.screen >= Screen::editing) {
-        const float time = frame.screen == Screen::difficulty ? phase : 34.0f + frame.editor_age_ms / 5000.0f;
+        const float age = menu_frame_ms_ - menu_enter_ms_;
+        const bool choosing = frame.screen == Screen::difficulty;
+        const float time = choosing ? age / 5000.0f : 34.0f + frame.editor_age_ms / 5000.0f;
+        const float hidden = choosing ? 1.0f - std::min(1.0f, age / 512.0f) : 0.0f;
         const float scale = shz_sinf(time / 8) + 2;
-        rotated_sprite(editor_bg, 320 + 160 * shz_sinf(time / 2), 240 - 120 * shz_cosf(time),
-                       1457 * scale, 402 * scale, time, 0.01f);
+        rotated_sprite(editor_bg, 320 + 1280 * hidden * hidden + 160 * shz_sinf(time / 2),
+                       240 - 120 * shz_cosf(time), 1457 * scale, 402 * scale, time, 0.01f);
     } else {
-        rotated_sprite(keyboard, 320 + 160 * shz_cosf(phase / 2), 240 - 120 * shz_sinf(phase),
+        const float age = menu_frame_ms_ - (menu_main_enter_ms_ ? menu_main_enter_ms_ : menu_enter_ms_);
+        const float phase = age / 5000.0f;
+        const float zoom = shz_sinf(phase / 8) + 2;
+        const float hidden = 1.0f - std::min(1.0f, age / 512.0f);
+        rotated_sprite(keyboard, 320 + 1280 * hidden * hidden + 160 * shz_cosf(phase / 2),
+                       240 - 120 * shz_sinf(phase),
                        958 * zoom, 272 * zoom, phase, 0.01f);
     }
 }
@@ -1057,7 +1130,7 @@ void View::menu_backdrop(const Frame &frame) {
 void View::credits(const CreditsFrame &frame) {
     constexpr float view_width = 640.0f;
     constexpr float view_height = 480.0f;
-    constexpr float line_height = 35.0f * 0.002f * view_width;  // SDL_ttf default.ttf at 22 px
+    const float line_height = font_height() * main_font * text_scale_;
     const float scroll_progress = frame.elapsed_ms / 5000.0f;
     const float offset = 1.0f - scroll_progress;
     const float hidden = 1.0f - frame.visibility;
@@ -1092,9 +1165,7 @@ void View::credits(const CreditsFrame &frame) {
                     left = 320.0f;
                 } else if (line.align == CreditAlign::right) {
                     left = 576.0f;
-                    for (const char *p = line.text; *p; ++p) {
-                        left -= scale * widths_[*p - ' '];
-                    }
+                    left -= scale * text_scale_ * text_width(line.text);
                 }
                 text(left - slide, top, line.text, scale, line.gold ? gold : yellow,
                      line.align == CreditAlign::center);
@@ -1115,23 +1186,69 @@ void View::fit_text(float x, float y, const char *line, float width, float size,
 void View::score_stars(float x, float y, float size, unsigned count, uint32_t color) {
     for (unsigned i = 0; i < 5; ++i) {
         const auto id = i < count ? star : star_off;
-        sprite(id, x + i * size, y, size, size * 0.96f, menu_depth, 0, 1, 1, 0, color);
+        const float left = x + i * size;
+        const float height = size * 109.0f / (id == star ? 113.0f : 114.0f);
+        sprite(id, left + 1.92f, y + 1.92f, size, height, menu_depth, 0, 1, 1, 0, color & 0xff000000);
+        sprite(id, left, y, size, height, menu_depth, 0, 1, 1, 0, color);
     }
 }
 
-View::TextureId View::cassette_label(const SongEntry &song) const {
-    for (size_t slot = 0; slot < custom_labels_.size(); ++slot) {
-        if (custom_labels_[slot].ready && custom_labels_[slot].song == song.midi) {
-            return static_cast<TextureId>(custom_label_a + slot);
-        }
-    }
+View::TextureId View::stock_cassette_label(std::string_view key) const {
+    const auto found = std::find(stock_label_keys.begin(), stock_label_keys.end(), key);
+    return found == stock_label_keys.end() ? texture_count :
+        static_cast<TextureId>(label_bangbang + (found - stock_label_keys.begin()));
+}
+
+View::TextureId View::song_cassette_label(const SongEntry &song) const {
     if (song.midi == "/cd/songs/bangbang/notes.mid") return label_bangbang;
     if (song.midi == "/cd/songs/defy/notes.mid") return label_defy;
     if (song.midi == "/cd/songs/twibmpg/notes.mid") return label_twibmpg;
     return texture_count;
 }
 
+View::TextureId View::cassette_label(const SongEntry &song) const {
+    const auto preset = stock_cassette_label(song.cassette_label);
+    if (preset != texture_count) {
+        return preset;
+    }
+    for (size_t slot = 0; slot < custom_labels_.size(); ++slot) {
+        if (custom_labels_[slot].ready && custom_labels_[slot].song == song.midi) {
+            return static_cast<TextureId>(custom_label_a + slot);
+        }
+    }
+    return song_cassette_label(song);
+}
+
+static std::string original_label_path(const SongEntry &song) {
+    const auto directory = song.library_count >= 0 ? song.midi : song.midi.substr(0, song.midi.rfind('/'));
+    return directory + "/label";
+}
+
+void View::prepare_editor_label(const Frame &frame) {
+    const auto &key = (*frame.editor_labels)[frame.selected].key;
+    const auto &entry = frame.editor->entry();
+    editor_label_preview_ = stock_cassette_label(key);
+    if (editor_label_preview_ != texture_count) {
+        return;
+    }
+    const auto path = key.empty() ? original_label_path(entry) : editor_label_path(key);
+    auto &cached = custom_labels_[0];
+    if (cached.song != path) {
+        if (textures_[custom_label_a].memory && pvr_wait_render_done() < 0) {
+            return;
+        }
+        cached.song = path;
+        cached.ready = !path.empty() && load_texture(custom_label_a, path.c_str(), false);
+    }
+    editor_label_preview_ = cached.ready ? custom_label_a :
+                            key.empty() ? song_cassette_label(entry) : texture_count;
+}
+
 void View::prepare_cassette_labels(const Frame &frame, const std::vector<SongEntry> &library) {
+    if (frame.screen == Screen::editor_label) {
+        prepare_editor_label(frame);
+        return;
+    }
     if (frame.screen != Screen::setlist || !frame.selected || frame.selected >= library.size()) {
         for (size_t slot = 0; slot < custom_labels_.size(); ++slot) {
             auto &texture = textures_[custom_label_a + slot];
@@ -1147,16 +1264,16 @@ void View::prepare_cassette_labels(const Frame &frame, const std::vector<SongEnt
         return;
     }
 
-    const size_t first = std::max(1u, frame.selected - 1);
-    const size_t last = std::min(library.size(), size_t(frame.selected + 2));
+    const auto visible = visible_cassettes(frame.selected);
     std::array<std::string_view, 3> wanted{};
-    for (size_t i = first; i < last; ++i) {
-        if (cassettes_[i].label_loaded) {
-            wanted[i - first] = library[i].midi;
+    for (size_t slot = 0; slot < visible.size(); ++slot) {
+        const auto i = visible[slot];
+        if (i && cassettes_[i].label_loaded) {
+            wanted[slot] = library[i].midi;
         }
     }
-    for (size_t i = first; i < last; ++i) {
-        const auto name = wanted[i - first];
+    for (size_t slot = 0; slot < visible.size(); ++slot) {
+        const auto name = wanted[slot];
         if (name.empty() || std::any_of(custom_labels_.begin(), custom_labels_.end(),
             [name](const CachedLabel &label) { return label.song == name; })) {
             continue;
@@ -1174,9 +1291,10 @@ void View::prepare_cassette_labels(const Frame &frame, const std::vector<SongEnt
             continue;
         }
         free->song = name;
-        const auto directory = library[i].library_count >= 0 ? name : name.substr(0, name.rfind('/'));
-        const auto path = std::string(directory) + "/label";
-        free->ready = load_texture(id, path.c_str(), false, true);
+        const auto &entry = library[visible[slot]];
+        const auto override_path = editor_label_path(entry.cassette_label);
+        free->ready = (!override_path.empty() && load_texture(id, override_path.c_str(), false, true)) ||
+                      load_texture(id, original_label_path(entry).c_str(), false, true);
     }
 }
 
@@ -1227,13 +1345,39 @@ void View::update_cassettes(const Frame &frame, const std::vector<SongEntry> &li
     for (size_t i = 1; i < songs; ++i) {  // The Tutorial opens from the main menu.
         auto &item = cassettes_[i];
         item.angle = std::clamp(item.angle + (i == frame.selected ? dt : -dt) * 0.5f, 0.0f, 90.0f);
-        const float closed = library[i].library_count >= 0 ? 1.2f : 0.8f;
+        item.shown = !frame.chooser || frame.chooser->matches(library[i]);
+        if (!item.shown) {
+            continue;
+        }
+        const bool folder = library[i].library_count >= 0;
+        item.label_loaded |= folder || i == frame.selected;
+        const float closed = folder ? 1.2f : 0.8f;
         const float height = closed + (4.0f - closed) * shz_sinf_deg(item.angle);
         item.center_y = y + height / 2;
         y += height;
     }
-    cassettes_[frame.selected].label_loaded = true;
-    cassette_target_ = cassettes_[frame.selected].center_y;
+    if (cassettes_[frame.selected].shown) {
+        cassette_target_ = cassettes_[frame.selected].center_y;
+    }
+}
+
+std::array<size_t, 3> View::visible_cassettes(unsigned selected) const {
+    // Keep the original three-cassette vertex budget when filtering a large collection.
+    std::array<size_t, 3> visible{};
+    for (size_t i = selected; i > 1;) {
+        if (cassettes_[--i].shown) {
+            visible[0] = i;
+            break;
+        }
+    }
+    visible[1] = cassettes_[selected].shown ? selected : 0;
+    for (size_t i = selected + 1; i < cassettes_.size(); ++i) {
+        if (cassettes_[i].shown) {
+            visible[2] = i;
+            break;
+        }
+    }
+    return visible;
 }
 
 void View::draw_cassettes(const Frame &frame, const std::vector<SongEntry> &library, bool stickers) {
@@ -1246,9 +1390,10 @@ void View::draw_cassettes(const Frame &frame, const std::vector<SongEntry> &libr
     if (camera_slide > 7.0f) {
         return;  // The group starts outside the left edge of the view.
     }
-    const size_t first = std::max(1u, frame.selected - 1);
-    const size_t last = std::min(library.size(), size_t(frame.selected + 2));
-    for (size_t i = first; i < last; ++i) {
+    for (const auto i : visible_cassettes(frame.selected)) {
+        if (!i) {
+            continue;
+        }
         const auto &pose = cassettes_[i];
         const bool folder = library[i].library_count >= 0;
         const auto turn = shz_sincosf_deg(folder ? -pose.angle : pose.angle);
@@ -1308,63 +1453,68 @@ void View::draw_cassettes(const Frame &frame, const std::vector<SongEntry> &libr
     }
 }
 
+float View::wrapped_text(float x, float y, const std::string &label, float size,
+                         uint32_t color, float hidden, float right) {
+    const float space = text_width(" ") * size * text_scale_;
+    const float height = font_height() * size * text_scale_;
+    float left = x;
+    size_t from = 0;
+    for (unsigned index = 0; from < label.size(); ++index) {
+        const auto next = label.find(' ', from);
+        const auto word = label.substr(from, next - from);
+        const float width = text_width(word.c_str()) * size * text_scale_;
+        if (left + width > right || word == "\n") {
+            left = x;
+            y += height;
+        }
+        if (word != "\n") {
+            const float drop = hidden * index * 640;
+            const float angle = -hidden * (index + 1) * matrix_pi / 4;
+            text(left, y + drop, word.c_str(), size, color, false, 0.0f, angle);
+            left += width + space;
+        }
+        from = next == std::string::npos ? label.size() : next + 1;
+    }
+    return y;
+}
+
 void View::setlist(const Frame &frame, const std::vector<SongEntry> &library) {
     if (library.empty() || frame.selected >= library.size()) {
         return;
     }
-    text(384, 32, tr("Choose a Song"), main_font, yellow);
+    const float age = cassette_frame_ms_ ? cassette_frame_ms_ - cassette_enter_ms_ : 0;
+    const float hidden = 1.0f - std::min(1.0f, age / 512.0f);
+    const float slide = hidden * hidden;
+    const auto unselected = tint(yellow, 1.0f - slide);
+    const auto selected = tint(gold, 1.0f - slide);
+    text(384, 32 - 640 * slide, tr("Choose a Song"), main_font, unselected);
     if (!frame.search.empty()) {
         auto filter = language_.format("Filter: %s", frame.search) + '|';
         if (!frame.filter_match) {
             filter += std::string(" (") + tr("Not found") + ')';
         }
-        fit_text(32, 448, filter.c_str(), 580, 0.5f * main_font, yellow);
+        fit_text(32, 448 + 640 * slide, filter.c_str(), 580, 0.5f * main_font, unselected);
     }
-    if (!frame.filter_match) {
+    if (!frame.selected || !frame.filter_match) {
         return;
     }
-    const auto wrapped = [&](const std::string &label, float y, uint32_t color) {
-        std::string line;
-        size_t from = 0;
-        float width = 0;
-        const float scale = main_font * 0.84f;
-        while (from < label.size()) {
-            const auto next = label.find(' ', from);
-            const auto word = label.substr(from, next - from);
-            const float word_width = text_width(word.c_str()) * scale;
-            constexpr float gap = 6.0f;
-            if (!line.empty() && width + gap + word_width > 217) {
-                text(384, y, line.c_str(), scale, color);
-                y += 36;
-                line.clear();
-                width = 0;
-            }
-            if (!line.empty()) {
-                line += ' ';
-                width += gap;
-            }
-            line += word;
-            width += word_width;
-            from = next == std::string::npos ? label.size() : next + 1;
-        }
-        if (!line.empty()) {
-            text(384, y, line.c_str(), scale, color);
-            y += 36;
-        }
-        return y;
-    };
+    const float closed = 1.0f - cassettes_[frame.selected].angle / 90.0f;
+    const float turn = closed * closed;
+    constexpr float label_size = 0.8f * main_font;
+    const float label_height = font_height() * label_size * text_scale_;
     const auto &song = library[frame.selected];
-    const auto after_title = wrapped(song.title, 96, gold);
+    const auto after_title = wrapped_text(384, 96, song.title, label_size, selected, turn);
     if (song.library_count >= 0) {
         const auto count = song.library_count == 1 ? std::string(tr("One song in this library")) :
                            language_.format("%d songs in this library", std::to_string(song.library_count));
-        wrapped(count, after_title + 72, yellow);
+        wrapped_text(384, after_title + 3 * label_height, count, label_size, unselected, turn);
         return;
     }
-    wrapped(song.artist, after_title, yellow);
+    wrapped_text(384, after_title + label_height, song.artist, label_size, unselected, turn);
     if (frame.scores) {
-        float y = frame.available == 0x0f ? 268.8f : 320.0f;
+        float y = (frame.available == 0x0f ? 268.8f : 320.0f) + 320.0f * turn;
         constexpr float size = 0.55f * main_font;
+        const float h = font_height() * size * text_scale_;
         for (int difficulty = 3; difficulty >= 0; --difficulty) {
             if (!(frame.available & (1u << difficulty))) {
                 continue;
@@ -1375,11 +1525,11 @@ void View::setlist(const Frame &frame, const std::vector<SongEntry> &library) {
             if (best) {
                 std::snprintf(points, sizeof(points), "%lu", static_cast<unsigned long>(best->points));
             }
-            text(384, y, tr(difficulties[difficulty]), size, yellow);
-            fit_text(480, y, points, 150, size, gold);
-            score_stars(384, y + 24.6f, 17, best ? best->stars : 0, yellow);
-            fit_text(480, y + 24.6f, best ? best->name.c_str() : "---", 150, size, gold);
-            y += 49.3f;
+            text(384, y, tr(difficulties[difficulty]), size, unselected);
+            fit_text(480, y, points, 150, size, selected);
+            score_stars(384, y + h, h * 0.75f * 0.9f, best ? best->stars : 0, unselected);
+            fit_text(480, y + h, best ? best->name.c_str() : "---", 150, size, selected);
+            y += 2 * h + 160.0f * turn;
         }
     }
 }
@@ -1394,8 +1544,8 @@ void View::draw_editor(const Frame &frame) {
         "Set Cassette Label", "Editing Help", "Quit to Main Menu"
     };
     constexpr const char *prompts[] = {
-        "", "Enter Song Name", "Enter Artist Name", "Enter Beats per Minute", "",
-        "Enter A/V delay", "Enter a cassette color (#RRGGBB)"
+        "", "Enter Song Name", "Enter Artist Name", "Enter Beats per Minute Value", "",
+        "Enter A/V delay in milliseconds", "Enter cassette color in HTML (#RRGGBB) format."
     };
     constexpr float overlay_text = 2.0f;
     const auto items = [&](const char *const *names, unsigned count, float top, float space, float size) {
@@ -1574,8 +1724,28 @@ void View::draw_editor(const Frame &frame) {
         fit_text(48, 220, frame.editor_text.c_str(), 544, main_font, yellow, overlay_text);
     } else if (frame.screen == Screen::editor_tempo) {
         text(320, 155, tr("Estimate Beats per Minute"), main_font, gold, true, overlay_text);
-        text(320, 210, tr("Tap Space to the beat"), main_font, yellow, true, overlay_text);
-        text(320, 265, frame.editor_text.c_str(), main_font, gold, true, overlay_text);
+        fit_text(64, 210, tr("Tap the Space bar to the beat of the song. Press Enter when done or Escape to cancel."),
+                 512, main_font, yellow, overlay_text);
+        if (!frame.editor_text.empty()) {
+            text(320, 265, frame.editor_text.c_str(), main_font, gold, true, overlay_text);
+        }
+    } else if (frame.screen == Screen::editor_label) {
+        fit_text(32, 44, tr("Choose a 256x128 PNG format label image."), 576, main_font,
+                 gold, overlay_text);
+        const auto &labels = *frame.editor_labels;
+        const size_t first = frame.selected >= 8 ? frame.selected - 7 : 0;
+        const size_t last = std::min(labels.size(), first + 8);
+        for (size_t i = first; i < last; ++i) {
+            const auto &item = labels[i];
+            const auto *title = item.key.empty() ? tr(item.title.c_str()) : item.title.c_str();
+            fit_text(32, 117 + (i - first) * 37, title, 344, main_font,
+                     frame.selected == i ? gold : yellow, overlay_text);
+        }
+        if (editor_label_preview_ != texture_count) {
+            sprite(editor_label_preview_, 394, 143, 222, 111, menu_depth + overlay_text);
+        }
+    } else if (frame.screen == Screen::editor_saving) {
+        text(320, 215, tr("Saving..."), main_font, gold, true, overlay_text);
     } else if (frame.editor_text.empty()) {
         text(64, 110, tr("Editing keys: "), main_font, gold, false, overlay_text);
         text(64, 155, tr("Arrows - Move cursor"), main_font, yellow, false, overlay_text);
@@ -1594,6 +1764,13 @@ void View::menu(const Frame &frame, const Round &round,
         text(x, y, tr(label), main_font, frame.selected == index ? gold : yellow);
     };
     const auto center = [&](float y, const char *label) { text(320, y, tr(label), main_font, yellow, true); };
+    const float age_ms = menu_frame_ms_ - menu_enter_ms_;
+    const float menu_hidden = 1.0f - std::min(1.0f, age_ms / 512.0f);
+    const float menu_slide = menu_hidden * menu_hidden;
+    const float spacing = font_height() * main_font * text_scale_;
+    // On the fixed viewport all the visible menu entries still need to fit.
+    const float row_spacing = std::min(spacing, (480.0f - menu_y) / 6.0f);
+    const float row_font = main_font * row_spacing / spacing;
     const auto dim = [&](float visibility) {
         material(overlay_header_);
         const auto top = tint(0, 0.3f * visibility);
@@ -1609,9 +1786,11 @@ void View::menu(const Frame &frame, const Round &round,
     };
     char line[128];
     if (frame.countdown > 0.0f && (frame.screen == Screen::countdown || frame.screen == Screen::pause)) {
-        const float title_alpha = 4.0f - std::abs(4.0f - frame.countdown);
-        text(32, 12, frame.title, 0.75f * main_font, tint(yellow, title_alpha));
-        text(32, 38, frame.artist, 0.75f * main_font, tint(yellow, title_alpha));
+        const auto title_color = tint(yellow, 4.0f - std::abs(4.0f - frame.countdown));
+        const float title_end = wrapped_text(32, 32 - 0.5f * spacing, frame.title,
+                                            0.75f * main_font, title_color, 0.0f, 384.0f);
+        wrapped_text(32, title_end + 0.75f * spacing, frame.artist,
+                     0.75f * main_font, title_color, 0.0f, 384.0f);
         if (frame.countdown > 1.0f) {
             const float prompt_alpha = 3.0f - std::abs(4.0f - frame.countdown);
             text(320, 192, tr("Get Ready to Rock"), main_font, tint(yellow, prompt_alpha), true);
@@ -1620,7 +1799,7 @@ void View::menu(const Frame &frame, const Round &round,
                 const float beat_fraction = frame.countdown - beat;
                 const float scale = 1.28f * (1.0f + 0.25f * beat_fraction * beat_fraction * beat_fraction);
                 std::snprintf(line, sizeof(line), "%d", beat);
-                title_number(288 - 0.5f * title_font_height * scale, line, scale, gold);
+                title_number(288 - 0.5f * big_font_height() * scale * text_scale_, line, scale, gold);
             }
         }
     }
@@ -1634,10 +1813,7 @@ void View::menu(const Frame &frame, const Round &round,
                    (0.5f + frame.picture_fade) * 480.0f - heights[picture] * 0.5f,
                    widths[picture], heights[picture], menu_depth);
         }
-        // Match the SDL_ttf baseline at 22 px. Both generated atlases use y=26.
-        const float ascent = language_.international() ? 21.0f : 25.0f;
-        const float caption_top = 0.67f * 640.0f +
-                                  (ascent * 1.28f - 26.0f * main_font) * text_scale_;
+        constexpr float caption_top = 0.67f * 640.0f;
         for (const auto *caption : frame.tutorial_captions) {
             if (caption) {
                 text(320, caption_top, tr(caption), main_font, white, true);
@@ -1653,16 +1829,19 @@ void View::menu(const Frame &frame, const Round &round,
 
     switch (frame.screen) {
         case Screen::menu: {
-            const float phase = (timer_ms_gettime64() % 251327) / 5000.0f;
-            rotated_sprite(logo, 320, 96, 572 * (1 + 0.025f * shz_sinf(phase * 16)),
-                           138 * (1 - 0.025f * shz_cosf(phase * 17)), 0, menu_depth);
-            rotated_sprite(menu_pose, 480, 312, 302 * 0.9f, 413 * 0.9f, 0, menu_depth);
-            constexpr const char *options[] = {"Play Game", "Tutorial", "Song Editor", "Settings >", "Credits", "Quit"};
-            for (unsigned i = 0; i < 6; ++i) {
-                item(128, menu_y + i * menu_line, options[i], i);
+            const float art_age = menu_frame_ms_ - menu_main_enter_ms_;
+            main_menu_art(art_age / 5000.0f, 1.0f - std::min(1.0f, art_age / 512.0f));
+            const std::string editor = std::string(tr("Song Editor")) + " >";
+            const char *options[] = {tr("Play Game"), tr("Tutorial"), editor.c_str(),
+                                     tr("Settings >"), tr("Credits"), tr("Quit")};
+            float row_slide = menu_slide;
+            for (unsigned i = 0; i < std::size(options); ++i) {
+                menu_item(128, menu_y + i * row_spacing, options[i], row_font,
+                          i == frame.selected, row_slide);
+                row_slide *= 2.0f;
             }
             if (frame.input == InputDevice::none) {
-                text(128, 410, "Connect a keyboard", .8f * main_font, yellow);
+                text(128, 168, "Connect a keyboard", .7f * row_font, yellow);
             }
             break;
         }
@@ -1672,12 +1851,8 @@ void View::menu(const Frame &frame, const Round &round,
                 break;
             }
             if (settings->page != SettingsPage::pause_volume) {
-                const float phase = (timer_ms_gettime64() % 251327) / 5000.0f;
-                rotated_sprite(logo, 320, 96, 572 * (1 + 0.025f * shz_sinf(phase * 16)),
-                               138 * (1 - 0.025f * shz_cosf(phase * 17)), 0, menu_depth);
-                rotated_sprite(menu_pose, 480, 312, 302 * 0.9f, 413 * 0.9f, 0, menu_depth);
-            } else {
-                dim(1.0f);
+                const float art_age = menu_frame_ms_ - menu_main_enter_ms_;
+                main_menu_art(art_age / 5000.0f, 1.0f - std::min(1.0f, art_age / 512.0f));
             }
             if (settings->page == SettingsPage::key_test) {
                 dim(0.9f);
@@ -1700,13 +1875,12 @@ void View::menu(const Frame &frame, const Round &round,
                 break;
             }
             const auto last = std::min(settings->row_count(), settings->offset + 6);
-            const float spacing = menu_line * std::min(1.0f, text_scale_);
             const float depth = settings->page == SettingsPage::pause_volume ? 1.0f : 0.0f;
+            float row_slide = menu_slide;
             for (unsigned i = settings->offset; i < last; ++i) {
                 const auto &row = settings->row(i);
                 const bool current = i == settings->selected;
-                const auto y = menu_y + (i - settings->offset) * spacing;
-                const auto color = current ? gold : yellow;
+                const auto y = menu_y + (i - settings->offset) * row_spacing;
                 auto value = row.setting == Setting::language ? Language::name(settings->draft.language) :
                              setting_value(settings->draft, row);
                 const bool submenu = row.setting == Setting::game || row.setting == Setting::mods ||
@@ -1717,7 +1891,7 @@ void View::menu(const Frame &frame, const Round &round,
                     label += " >";
                 } else if (!value.empty()) {
                     const bool adjust = current && row.setting != Setting::binding &&
-                                        row.setting != Setting::upload && row.setting != Setting::resolution &&
+                                        row.setting != Setting::resolution &&
                                         row.setting != Setting::fullscreen && row.setting != Setting::fps &&
                                         row.setting != Setting::antialiasing && row.setting != Setting::frequency &&
                                         row.setting != Setting::sample_bits && row.setting != Setting::buffer;
@@ -1730,13 +1904,14 @@ void View::menu(const Frame &frame, const Round &round,
                         label += " >";
                     }
                 }
-                fit_text(128, y, label.c_str(), 484, main_font, color, depth);
+                menu_item(128, y, label.c_str(), row_font, current, row_slide, depth);
+                row_slide *= 2.0f;
             }
             if (settings->offset) {
-                text(95, menu_y, "^", main_font, yellow, false, depth);
+                text(95, menu_y, "^", row_font, yellow, false, depth);
             }
             if (last < settings->row_count()) {
-                text(95, menu_y + 5 * spacing, "v", main_font, yellow, false, depth);
+                text(95, menu_y + 5 * row_spacing, "v", row_font, yellow, false, depth);
             }
             break;
         }
@@ -1746,15 +1921,20 @@ void View::menu(const Frame &frame, const Round &round,
         case Screen::setlist:
             setlist(frame, library);
             break;
-        case Screen::difficulty:
-            text(64, 32, tr("Choose a difficulty:"), main_font, yellow);
+        case Screen::difficulty: {
+            text(64, 32 - 640.0f * menu_slide, tr("Choose a difficulty:"), main_font,
+                 tint(yellow, 1.0f - menu_slide));
+            float row_slide = menu_slide;
             for (int i = 3, row = 0; i >= 0; --i) {
                 if (frame.available & (1u << i)) {
-                    item(128, menu_y + row * menu_line, difficulties[i], i);
+                    menu_item(128, menu_y + row * row_spacing, tr(difficulties[i]), row_font,
+                              frame.selected == unsigned(i), row_slide);
                     ++row;
+                    row_slide *= 2.0f;
                 }
             }
             break;
+        }
         case Screen::countdown:
             break;
         case Screen::pause: {
@@ -1765,10 +1945,8 @@ void View::menu(const Frame &frame, const Round &round,
             };
             float transition = hidden * hidden;
             for (unsigned i = 0; i < 5; ++i) {
-                const bool selected = frame.selected == i;
-                const auto color = tint(selected ? gold : yellow, 1.0f - transition * (selected ? 2 : 1));
-                text(128 - 160 * transition, menu_y + i * menu_line, tr(options[i]), main_font,
-                     color, false, 1.0f);
+                menu_item(128, menu_y + i * row_spacing, tr(options[i]), row_font,
+                          i == frame.selected, transition, 1.0f);
                 transition *= 2.0f;
             }
             break;
@@ -1784,9 +1962,10 @@ void View::menu(const Frame &frame, const Round &round,
             if (frame.results_actions) {
                 const auto title = language_.format("Highest Scores (%s)", tr(difficulties[frame.difficulty]));
                 text(320, (0.05f - slide) * 640, title.c_str(), main_font, color, true);
+                std::string footer;
                 if (frame.scores && frame.result_song < library.size()) {
                     const auto &table = frame.scores->table(library[frame.result_song].midi, frame.difficulty);
-                    constexpr float size = 0.85f * main_font;
+                    const float size = 0.85f * row_font;
                     float y = (0.15f + slide) * 640;
                     unsigned row = 0;
                     for (const auto &entry : table) {
@@ -1796,10 +1975,10 @@ void View::menu(const Frame &frame, const Round &round,
                         text(64, y, line, size, row_color);
                         std::snprintf(line, sizeof(line), "%lu", static_cast<unsigned long>(entry.points));
                         fit_text(96, y, line, 120, size, row_color);
-                        score_stars(224, y + 3, 22, entry.stars, row_color);
+                        score_stars(224, y, row_spacing * 0.75f * 0.85f * 0.9f, entry.stars, row_color);
                         fit_text(384, y, entry.name.c_str(), 232, size, row_color);
                         ++row;
-                        y += menu_line;
+                        y += row_spacing;
                     }
                     const char *notice = nullptr;
                     switch (frame.scores->save_status()) {
@@ -1809,22 +1988,40 @@ void View::menu(const Frame &frame, const Round &round,
                         case ScoreBook::SaveStatus::error: notice = "VMU error. Scores kept for this session."; break;
                         default: break;
                     }
-                    if (notice) {
-                        text(32, 452, notice, 0.5f * main_font, yellow);
-                    }
+                    footer = notice ? tr(notice) : "";
                 }
-                item(128, 320, "Replay", 0);
-                item(128, 365, "Change Song", 1);
-                item(128, 410, "Quit to Main Menu", 2);
+                constexpr const char *actions[] = {"Replay", "Change Song", "Quit to Main Menu"};
+                float row_slide = menu_slide;
+                for (unsigned i = 0; i < std::size(actions); ++i) {
+                    menu_item(128, 320 + i * row_spacing, tr(actions[i]), row_font,
+                              frame.selected == i, row_slide);
+                    row_slide *= 2.0f;
+                }
+                std::string upload_notice;
+                if (frame.upload_status == UploadStatus::pending) {
+                    upload_notice = tr("Uploading Scores...");
+                } else if (frame.upload_status == UploadStatus::failed) {
+                    upload_notice = tr("Score upload failed");
+                } else if (frame.upload_status == UploadStatus::succeeded && frame.upload_ordinal > 0) {
+                    upload_notice = language_.format("You're #%d on the world charts!",
+                                                      std::to_string(frame.upload_ordinal));
+                }
+                if (!upload_notice.empty()) {
+                    if (!footer.empty()) {
+                        footer += " | ";
+                    }
+                    footer += upload_notice;
+                }
+                fit_text(32, 452, footer.c_str(), 576, 0.55f * row_font, color);
                 break;
             }
             text(320, (0.05f - slide) * 640, tr("Song Finished!"), main_font, color, true);
             const float rise = anim(0, 1000);
             const auto score = age >= 2000 ? round.score : static_cast<unsigned>(round.score * double(anim(1000, 2000)));
             std::snprintf(line, sizeof(line), "%u", score);
-            title_number((1.11f + slide - rise * rise * rise) * 640, line, 1.6f, color);
+            title_number((1.11f + slide - rise * rise * rise) * 640, line, 1.6f, color, main_font);
             if (age > 1000) {
-                constexpr float star_width = 0.75f * title_font_height * 0.0017f * 640;
+                const float star_width = 0.75f * big_font_height() * 0.0017f * 640 * text_scale_;
                 const auto rating = round.rating(frame.gems);
                 const float y = (0.35f + slide) * 640;
                 for (unsigned i = 0; i < 5; ++i) {
@@ -1844,8 +2041,9 @@ void View::menu(const Frame &frame, const Round &round,
                 const auto accuracy = frame.gems ? round.gem_hits * 100 / frame.gems : 0;
                 const auto accuracy_text = language_.format("Accuracy: %d%%", std::to_string(accuracy));
                 const auto streak = language_.format("Longest note streak: %d", std::to_string(round.best_streak));
-                text(320, 352, accuracy_text.c_str(), main_font, color, true);
-                text(320, 396.8f, streak.c_str(), main_font, color, true);
+                const float y = 352 + 640.0f * slide;
+                text(320, y, accuracy_text.c_str(), main_font, color, true);
+                text(320, y + spacing, streak.c_str(), main_font, color, true);
             }
             if (frame.results_name) {
                 const float hidden_name = 1.0f - frame.name_visibility;
@@ -1894,6 +2092,8 @@ void View::menu(const Frame &frame, const Round &round,
         case Screen::editor_actions:
         case Screen::editor_value:
         case Screen::editor_tempo:
+        case Screen::editor_label:
+        case Screen::editor_saving:
         case Screen::editor_message:
             draw_editor(frame);
             break;
@@ -1906,16 +2106,19 @@ void View::draw(const Frame &frame, const SongChart &song, const Round &round,
                 const std::vector<SongEntry> &library) {
     text_scale_ = frame.text_scale / 100.0f;
     lefty_ = frame.lefty;
+    update_menu_clock(frame);
     const bool playing = frame.screen == Screen::play || frame.screen == Screen::pause ||
                          frame.screen == Screen::countdown ||
                          (frame.screen == Screen::settings && frame.settings_menu &&
                           frame.settings_menu->page == SettingsPage::pause_volume);
-    const float period = song.us_per_beat(frame.time_ms) * 0.001f;
-    const float period_ms = period;
     const auto &chart = song.guitar[frame.difficulty];
     update_cassettes(frame, library);
 
+    GuitarVisualFrame visual_timing{};
     if (playing) {
+        update_stage_beat(frame.time_ms);
+        visual_timing = guitar_clock_.render(frame.time_ms, song.tempos,
+                                             frame.countdown > 0.0f, frame.sustain_expired);
         update_frets(frame, round);
     }
     pvr_wait_ready();
@@ -1938,7 +2141,7 @@ void View::draw(const Frame &frame, const SongChart &song, const Round &round,
         if (!light_stage) {
             sprite(stage, 0, 0, 640, 480, 0.01f);
         }
-        note_heads(frame, chart, round, period_ms, false);
+        note_heads(frame, chart, round, visual_timing.note_period_ms, false);
         material(mesh_header_);
         for (unsigned lane = 0; lane < fret_vertices_.size(); ++lane) {
             const float weight = fret_weights_[lane];
@@ -1959,13 +2162,12 @@ void View::draw(const Frame &frame, const SongChart &song, const Round &round,
     pvr_list_begin(PVR_LIST_TR_POLY);
     active_header_ = nullptr;
     if (playing) {
-        update_stage(frame.time_ms, song);
         if (light_stage) {
             draw_light_stage(frame.time_ms, round);
         } else {
             stage_decoration(frame.time_ms);
         }
-        world(frame, song, round, chart, period_ms);
+        world(frame, round, chart, visual_timing);
         if (!light_stage) {
             stage_lights(frame, round);
         }

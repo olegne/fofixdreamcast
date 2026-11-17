@@ -16,7 +16,9 @@
 namespace dc {
 namespace {
 
-constexpr char signature[] = "FOFED1";
+constexpr char signature_v1[] = "FOFED1";
+constexpr char signature_v2[] = "FOFED2";
+static_assert(sizeof(signature_v1) == sizeof(signature_v2));
 constexpr char app_id[16] = "FOF CHART EDIT";
 constexpr unsigned max_file_size = 100 * 1024;
 constexpr unsigned max_midi_size = 2 * 1024 * 1024;
@@ -82,22 +84,25 @@ bool SongEdits::read_slot(maple_device *device, const std::string &path, int slo
     if (result == -2) {
         return true;
     }
-    if (result || size < int(sizeof(vmu_hdr_t) + sizeof(signature) + 16) ||
+    if (result || size < int(sizeof(vmu_hdr_t) + sizeof(signature_v2) + 16) ||
         size > int(max_file_size)) {
         return false;
     }
     const auto &header = *static_cast<vmu_hdr_t *>(raw);
     if (std::memcmp(header.app_id, app_id, sizeof(app_id)) || header.icon_cnt ||
-        header.eyecatch_type || header.data_len < sizeof(signature) + 16 ||
+        header.eyecatch_type || header.data_len < sizeof(signature_v2) + 16 ||
         header.data_len > unsigned(size) - sizeof(header)) {
         return false;
     }
     vmu_pkg_t package{};
-    if (vmu_pkg_parse(static_cast<uint8_t *>(raw), size, &package) ||
-        std::memcmp(package.data, signature, sizeof(signature))) {
+    if (vmu_pkg_parse(static_cast<uint8_t *>(raw), size, &package)) {
         return false;
     }
-    Reader reader{package.data + sizeof(signature), package.data + package.data_len};
+    const bool has_label = std::memcmp(package.data, signature_v2, sizeof(signature_v2)) == 0;
+    if (!has_label && std::memcmp(package.data, signature_v1, sizeof(signature_v1))) {
+        return false;
+    }
+    Reader reader{package.data + sizeof(signature_v2), package.data + package.data_len};
     Edit decoded;
     std::string identity;
     uint32_t midi_size, delay;
@@ -106,7 +111,9 @@ bool SongEdits::read_slot(maple_device *device, const std::string &path, int slo
         !reader.number(delay) || delay > 20000 || !reader.number(decoded.color) ||
         !reader.text(identity, 511) || identity != path ||
         !reader.text(decoded.title, 511) || decoded.title.empty() ||
-        !reader.text(decoded.artist, 511) || !reader.left()) {
+        !reader.text(decoded.artist, 511) ||
+        (has_label && (!reader.text(decoded.label, 48) || !valid_label_key(decoded.label))) ||
+        !reader.left()) {
         return false;
     }
     decoded.midi.resize(midi_size);
@@ -193,18 +200,20 @@ bool SongEdits::persist(const std::string &path, Edit &edit, std::string &messag
         return false;
     }
 
-    std::vector<uint8_t> payload(std::begin(signature), std::end(signature));
+    std::vector<uint8_t> payload(std::begin(signature_v2), std::end(signature_v2));
     encode_number(payload, edit.generation + 1);
     encode_number(payload, static_cast<uint32_t>(edit.midi.size()));
     encode_number(payload, uint32_t(edit.delay_ms + 10000));
     encode_number(payload, edit.color);
-    if (path.size() > 511 || edit.title.size() > 511 || edit.artist.size() > 511) {
+    if (path.size() > 511 || edit.title.size() > 511 || edit.artist.size() > 511 ||
+        !valid_label_key(edit.label)) {
         message = "Chart changed in RAM. The song metadata is too long.";
         return false;
     }
     encode_text(payload, path);
     encode_text(payload, edit.title);
     encode_text(payload, edit.artist);
+    encode_text(payload, edit.label);
     const auto first = payload.size();
     uLongf bytes = compressBound(edit.midi.size());
     payload.resize(first + bytes);
@@ -246,7 +255,7 @@ bool SongEdits::persist(const std::string &path, Edit &edit, std::string &messag
     Edit checked;
     if (!read_slot(device, path, next_slot, checked) || checked.generation != edit.generation + 1 ||
         checked.midi != edit.midi || checked.title != edit.title || checked.artist != edit.artist ||
-        checked.delay_ms != edit.delay_ms || checked.color != edit.color) {
+        checked.delay_ms != edit.delay_ms || checked.color != edit.color || checked.label != edit.label) {
         message = "Chart changed in RAM. The VMU readback failed.";
         return false;
     }
@@ -256,9 +265,9 @@ bool SongEdits::persist(const std::string &path, Edit &edit, std::string &messag
     edit.device_unit = checked.device_unit;
     edit.slot = checked.slot;
     message = "Chart saved to VMU.";
-    std::printf("FoFDC: editor saved midi=%s bytes=%u generation=%lu slot=%c%d\n",
+    std::printf("FoFDC: editor saved midi=%s bytes=%u generation=%lu slot=%c%d delay=%d label=%s\n",
                 path.c_str(), unsigned(edit.midi.size()), static_cast<unsigned long>(edit.generation),
-                'A' + edit.device_port, edit.device_unit);
+                'A' + edit.device_port, edit.device_unit, edit.delay_ms, edit.label.c_str());
     return true;
 }
 

@@ -136,16 +136,19 @@ bool SongChooser::matches() const {
 }
 
 void SongChooser::move(int step) {
-    if (!step || !matches()) {
+    if (!matches()) {
         return;
     }
-    do {
-        if (step > 0) {
-            selected_ = selected_ + 1 < items_.size() ? selected_ + 1 : 1;
-        } else {
-            selected_ = selected_ > 1 ? selected_ - 1 : items_.size() - 1;
-        }
-    } while (!matches());
+    const bool next = step > 0;
+    for (int moves = std::abs(step); moves > 0; --moves) {
+        do {
+            if (next) {
+                selected_ = selected_ + 1 < items_.size() ? selected_ + 1 : 1;
+            } else {
+                selected_ = selected_ > 1 ? selected_ - 1 : items_.size() - 1;
+            }
+        } while (!matches());
+    }
 }
 
 void SongChooser::type(unsigned char symbol) {

@@ -30,6 +30,7 @@ struct Settings {
     uint8_t mods = 0;
     bool lefty = false;
     bool tapping = true;
+    bool upload_scores = false;
 
     void load();
     void save() const;

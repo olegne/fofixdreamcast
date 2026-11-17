@@ -102,6 +102,7 @@ std::array<uint8_t, payload_size> encode(const Settings &settings, uint32_t gene
     bytes[16] = settings.language;
     bytes[17] = settings.lefty | (settings.tapping << 1);
     bytes[18] = settings.mods;
+    bytes[19] = settings.upload_scores;
     std::copy(settings.keys.begin(), settings.keys.end(), bytes.begin() + 24);
     return bytes;
 }
@@ -121,6 +122,7 @@ bool decode(const uint8_t *bytes, Settings &settings) {
     settings.lefty = bytes[17] & 1;
     settings.tapping = bytes[17] & 2;
     settings.mods = bytes[18];
+    settings.upload_scores = bytes[19] != 0;
     std::copy_n(bytes + 24, settings.keys.size(), settings.keys.begin());
     const auto valid_volume = [](unsigned level) { return level <= 100 && level % 10 == 0; };
     return settings.delay_ms <= 300 && settings.text_scale >= 50 && settings.text_scale <= 250 &&
@@ -128,7 +130,7 @@ bool decode(const uint8_t *bytes, Settings &settings) {
            valid_volume(settings.song_level) && valid_volume(settings.rhythm_level) &&
            (settings.miss_level == 0 || settings.miss_level == 25 ||
             settings.miss_level == 50 || settings.miss_level == 100) &&
-           settings.difficulty < 4 && bytes[17] <= 3 && settings.mods <= 3 &&
+           settings.difficulty < 4 && bytes[17] <= 3 && settings.mods <= 3 && bytes[19] <= 1 &&
            std::all_of(settings.keys.begin(), settings.keys.end(), valid_key);
 }
 
@@ -177,7 +179,7 @@ void log_settings(const char *action, const Settings &settings, uint32_t generat
     for (const auto key : settings.keys) {
         std::printf("%02x", key);
     }
-    std::putchar('\n');
+    std::printf(" upload_scores=%u\n", unsigned(settings.upload_scores));
 }
 
 template <typename Value>
@@ -414,6 +416,7 @@ bool adjust_setting(Settings &settings, S setting, int direction, unsigned langu
         case S::language: return languages && nudge(settings.language, direction, 0, languages - 1);
         case S::lefty: return nudge(settings.lefty, direction, 0, 1);
         case S::tapping: return nudge(settings.tapping, direction, 0, 1);
+        case S::upload: return nudge(settings.upload_scores, direction, 0, 1);
         case S::chilly: settings.mods ^= 1; return true;
         case S::light_graphics: settings.mods ^= 2; return true;
         case S::delay: return nudge(settings.delay_ms, direction, 0, 300);
@@ -441,7 +444,7 @@ std::string setting_value(const Settings &settings, const SettingRow &row) {
         case S::light_graphics: return settings.mods & 2 ? "Yes" : "No";
         case S::lefty: return settings.lefty ? "Yes" : "No";
         case S::tapping: return settings.tapping ? "Yes" : "No";
-        case S::upload: return "No (offline)";
+        case S::upload: return settings.upload_scores ? "Yes" : "No";
         case S::resolution: return "640x480";
         case S::fullscreen: return "Yes";
         case S::fps: return "Video refresh";

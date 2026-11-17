@@ -2,6 +2,7 @@
 #include "audio.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -19,14 +20,20 @@ namespace dc {
 namespace {
 
 constexpr unsigned cd_read_buffer_size = 16 * 1024;
-constexpr unsigned clip_sample_rate = 44100;
+constexpr unsigned resample_bits = 14;
+constexpr int resample_unit = 1 << resample_bits;
 
-bool read_pcm(OggVorbis_File &decoder, int16_t *samples, unsigned bytes) {
+bool read_pcm(OggVorbis_File &decoder, int16_t *samples, unsigned bytes, bool last_read) {
     auto *output = reinterpret_cast<char *>(samples);
     unsigned offset = 0;
     while (offset < bytes) {
         int section = 0;
         const auto got = ov_read(&decoder, output + offset, bytes - offset, 0, 2, 1, &section);
+        if (got == 0 && last_read) {
+            // A clean EOF can precede the declared final granule by a few samples.
+            std::memset(output + offset, 0, bytes - offset);
+            return true;
+        }
         if (got <= 0) {
             return false;
         }
@@ -64,7 +71,7 @@ bool AudioClip::load(const char *path) {
     }
     const auto *info = ov_info(decoder.get(), 0);
     const auto frames = ov_pcm_total(decoder.get(), 0);
-    if (ov_streams(decoder.get()) != 1 || !info || info->channels != 2 || info->rate != clip_sample_rate ||
+    if (ov_streams(decoder.get()) != 1 || !info || info->channels != 2 || info->rate != Audio::sample_rate ||
         frames <= 0 || frames >= std::numeric_limits<unsigned>::max() / 4 - Audio::block_frames) {
         ov_clear(decoder.get());
         return false;
@@ -80,7 +87,7 @@ bool AudioClip::load(const char *path) {
     auto *right = left + stride;
     for (unsigned offset = 0; offset < frames; offset += Audio::block_frames) {
         const auto count = std::min(Audio::block_frames, unsigned(frames) - offset);
-        if (!read_pcm(*decoder, interleaved, count * 2 * sizeof(int16_t))) {
+        if (!read_pcm(*decoder, interleaved, count * 2 * sizeof(int16_t), offset + count == frames)) {
             ov_clear(decoder.get());
             return false;
         }
@@ -113,7 +120,6 @@ bool Audio::start_clip(const AudioClip &clip, unsigned volume) {
         return false;
     }
     error_ = nullptr;
-    rate_ = clip_sample_rate;
     clip_gain_ = std::min(volume, 100u) * 128 / 100;
     auto &stem = stems_[0];
     stem.clip = &clip;
@@ -134,44 +140,50 @@ bool Audio::prepare(const char *backing, const char *guitar, const char *rhythm,
                     unsigned start_ms) {
     stop();
     error_ = nullptr;
-    rate_ = played_frames_ = 0;
+    played_frames_ = 0;
     guitar_gate_ = 1.0f;
     guitar_controls_backing_ = false;
     if (snd_init() < 0) {
         fail("AICA initialization failed.");
         return false;
     }
-    if (!open(stems_[0], backing, service) || (guitar && !open(stems_[1], guitar, service))) {
+    if (!open(stems_[0], backing, service)) {
         stop();
         return false;
     }
-    if (rhythm && !open(stems_[2], rhythm, service)) {
-        // Song.py treats a rhythm stem that cannot be loaded as optional.
-        std::printf("FoFDC: rhythm skipped: %s\n", error_);
-        close_stem(stems_[2]);
-        error_ = nullptr;
-    }
     length_frames_ = stems_[0].frames;
-    played_frames_ = unsigned(std::min(uint64_t(length_frames_ - 1), uint64_t(start_ms) * rate_ / 1000));
-    for (auto &stem : stems_) {
-        if (stem.open && played_frames_) {
-            const auto frame = std::min(played_frames_, stem.frames);
-            if (frame < stem.frames && ov_pcm_seek(&stem.decoder, frame) != 0) {
-                fail("Could not seek in the audio track.");
-                return false;
-            }
-            stem.decoded = frame;
+    played_frames_ = unsigned(std::min(uint64_t(length_frames_ - 1), uint64_t(start_ms) * sample_rate / 1000));
+    const auto prefill = [&](Stem &stem) {
+        if (!seek(stem, played_frames_)) {
+            error_ = "Could not seek in the audio track.";
+            return false;
         }
-        for (unsigned block = 0; stem.open && block < blocks; ++block) {
+        for (unsigned block = 0; block < blocks; ++block) {
             if (service) {
                 service();
             }
             if (!fill(stem, block)) {
-                fail("Error decoding the audio track.");
+                error_ = "Error decoding the audio track.";
                 return false;
             }
         }
         stem.service = nullptr;
+        return true;
+    };
+    if (!prefill(stems_[0])) {
+        stop();
+        return false;
+    }
+    // Song.py continues with the accompaniment if a companion fails to load.
+    const char *companions[] = {guitar, rhythm};
+    const char *names[] = {"guitar", "rhythm"};
+    for (unsigned i = 0; i < 2; ++i) {
+        auto &stem = stems_[i + 1];
+        if (companions[i] && (!open(stem, companions[i], service) || !prefill(stem))) {
+            std::printf("FoFDC: %s skipped: %s\n", names[i], error_);
+            close_stem(stem);
+            error_ = nullptr;
+        }
     }
     prepared_ = true;
     return true;
@@ -185,7 +197,7 @@ bool Audio::play_prepared() {
     prepared_ = false;
     begin_stream(played_frames_);
     std::printf("FoFDC: audio %u Hz, backing=%u ch guitar=%u ch samples=%u",
-                rate_, stems_[0].channels, stems_[1].channels, length_frames_);
+                sample_rate, stems_[0].channels, stems_[1].channels, length_frames_);
     if (stems_[2].open) {
         std::printf(" rhythm=%u ch", stems_[2].channels);
     }
@@ -244,18 +256,20 @@ bool Audio::open(Stem &stem, const char *path, PrepareService service) {
     const auto *info = ov_info(&stem.decoder, 0);
     const auto frames = ov_pcm_total(&stem.decoder, 0);
     if (ov_streams(&stem.decoder) != 1 || !info || info->channels < 1 || info->channels > 2 ||
-        info->rate < 8000 || info->rate > 48000 || frames <= 0 || frames > info->rate * 3600) {
+        info->rate < 8000 || info->rate > long(max_source_rate) || frames <= 0 || frames > info->rate * 3600) {
         error_ = "Unsupported Ogg Vorbis track.";
         return false;
     }
     const auto rate = static_cast<unsigned>(info->rate);
-    if (rate_ && rate_ != rate) {
-        error_ = "The audio tracks must share a sample rate.";
-        return false;
+    if (rate != sample_rate) {
+        stem.resampler.reset(new (std::nothrow) Resampler(rate, unsigned(frames)));
+        if (!stem.resampler) {
+            error_ = "Not enough memory to resample the audio track.";
+            return false;
+        }
     }
-    rate_ = rate;
     stem.channels = static_cast<unsigned>(info->channels);
-    stem.frames = static_cast<unsigned>(frames);
+    stem.frames = static_cast<unsigned>((frames * sample_rate + rate - 1) / rate);
     stem.decoded = 0;
     return allocate_channels(stem);
 }
@@ -272,11 +286,118 @@ bool Audio::allocate_channels(Stem &stem) {
     return true;
 }
 
-bool Audio::decode(Stem &stem, unsigned count) {
-    const auto frames = std::min(count, stem.frames - stem.decoded);
-    const unsigned bytes = frames * stem.channels * sizeof(int16_t);
-    if (!read_pcm(stem.decoder, decoded_, bytes)) {
+Audio::Resampler::Resampler(unsigned source_rate, unsigned frames)
+    : rate(source_rate), source_frames(frames),
+      step(rate / sample_rate), step_remainder(rate % sample_rate) {
+    constexpr double pi = 3.14159265358979323846;
+    const double cutoff = std::min(1.0, double(sample_rate) / rate);
+    for (unsigned phase_no = 0; phase_no <= phases; ++phase_no) {
+        const double fraction = double(phase_no) / phases;
+        double weights[taps];
+        double sum = 0.0;
+        for (unsigned i = 0; i < taps; ++i) {
+            const double time = double(i) - left - fraction;
+            const double angle = pi * time / (taps / 2);
+            const double sinc = time == 0.0 ? cutoff : std::sin(pi * cutoff * time) / (pi * time);
+            weights[i] = sinc * (0.42 + 0.5 * std::cos(angle) + 0.08 * std::cos(2 * angle));
+            sum += weights[i];
+        }
+        int quantized_sum = 0;
+        for (unsigned i = 0; i < taps; ++i) {
+            coefficients[phase_no][i] = static_cast<int16_t>(std::lround(weights[i] * resample_unit / sum));
+            quantized_sum += coefficients[phase_no][i];
+        }
+        coefficients[phase_no][left + (phase_no > phases / 2)] += resample_unit - quantized_sum;
+    }
+}
+
+bool Audio::seek(Stem &stem, unsigned frame) {
+    stem.decoded = std::min(frame, stem.frames);
+    if (stem.decoded >= stem.frames) {
+        return true;
+    }
+    if (stem.resampler) {
+        auto &resampler = *stem.resampler;
+        const auto scaled = uint64_t(frame) * resampler.rate;
+        resampler.position = static_cast<unsigned>(scaled / sample_rate);
+        resampler.phase = static_cast<unsigned>(scaled % sample_rate);
+        resampler.window_start = int(resampler.position) - int(Resampler::left);
+        resampler.buffered = 0;
+        // Retain the filter's source history when starting mid-track.
+        const int first = std::max(0, resampler.window_start);
+        return first == 0 || ov_pcm_seek(&stem.decoder, first) == 0;
+    }
+    return frame == 0 || ov_pcm_seek(&stem.decoder, frame) == 0;
+}
+
+bool Audio::resample(Stem &stem, unsigned count) {
+    auto &resampler = *stem.resampler;
+    const auto channels = stem.channels;
+    const int first = int(resampler.position) - int(Resampler::left);
+    const auto source_span = (resampler.phase + (count - 1) * resampler.rate) / sample_rate + Resampler::taps;
+    const auto discard = unsigned(first - resampler.window_start);
+    auto buffered = std::min(source_span, resampler.buffered - std::min(discard, resampler.buffered));
+    if (buffered && discard) {
+        std::memmove(resampler.source, resampler.source + discard * channels,
+                     buffered * channels * sizeof(int16_t));
+    }
+    const auto leading = std::min(source_span - buffered, unsigned(std::max(0, -first - int(buffered))));
+    std::fill_n(resampler.source + buffered * channels, leading * channels, 0);
+    buffered += leading;
+    const auto source_position = unsigned(first + int(buffered));
+    const auto read = std::min(source_span - buffered,
+                               resampler.source_frames - std::min(source_position, resampler.source_frames));
+    if (!read_pcm(stem.decoder, resampler.source + buffered * channels, read * channels * sizeof(int16_t),
+                  source_position + read >= resampler.source_frames)) {
         return false;
+    }
+    buffered += read;
+    std::fill(resampler.source + buffered * channels, resampler.source + source_span * channels, 0);
+    resampler.window_start = first;
+    resampler.buffered = source_span;
+
+    unsigned offset = 0;
+    unsigned phase = resampler.phase;
+    // All AICA voices advance at 44.1 kHz. The integer phase advances by the
+    // exact source/output ratio and is continuous through block refills.
+    for (unsigned i = 0; i < count; ++i) {
+        const auto phase_no = (phase * Resampler::phases + sample_rate / 2) / sample_rate;
+        const auto *filter = resampler.coefficients[phase_no];
+        const auto *source = resampler.source + offset * channels;
+        for (unsigned channel = 0; channel < channels; ++channel) {
+            int sum = 0;
+            for (unsigned tap = 0; tap < Resampler::taps; ++tap) {
+                sum += source[tap * channels + channel] * filter[tap];
+            }
+            decoded_[i * channels + channel] =
+                int16_t(std::clamp((sum + resample_unit / 2) >> resample_bits, -32768, 32767));
+        }
+        offset += resampler.step;
+        phase += resampler.step_remainder;
+        if (phase >= sample_rate) {
+            phase -= sample_rate;
+            ++offset;
+        }
+    }
+    resampler.position += offset;
+    resampler.phase = phase;
+    return true;
+}
+
+bool Audio::decode(Stem &stem, unsigned count) {
+    auto frames = std::min(count, stem.frames - stem.decoded);
+    if (frames) {
+        const bool decoded = stem.resampler ? resample(stem, frames) :
+                             read_pcm(stem.decoder, decoded_, frames * stem.channels * sizeof(int16_t),
+                                      stem.decoded + frames == stem.frames);
+        if (!decoded) {
+            if (&stem == &stems_[0] || (!active_ && !paused_)) {
+                return false;
+            }
+            std::printf("FoFDC: %s muted after an audio decoding error.\n", &stem == &stems_[1] ? "guitar" : "rhythm");
+            stem.decoded = stem.frames;
+            frames = 0;
+        }
     }
     stem.decoded += frames;
     std::memset(decoded_ + frames * stem.channels, 0, (count - frames) * stem.channels * sizeof(int16_t));
@@ -342,7 +463,7 @@ void Audio::queue_start() {
     voice->length = ring_frames;
     voice->loop = 1;
     voice->loopend = ring_frames;
-    voice->freq = rate_;
+    voice->freq = sample_rate;
     uint64_t mask = 0;
 
     snd_sh4_to_aica_stop();
@@ -366,7 +487,7 @@ void Audio::poll() {
         return;
     }
     const auto now = timer_us_gettime64();
-    const auto safe_poll_interval = uint64_t(ring_frames - block_frames) * 1000000 / rate_;
+    constexpr auto safe_poll_interval = uint64_t(ring_frames - block_frames) * 1000000 / sample_rate;
     if (now - last_poll_us_ >= safe_poll_interval) {
         fail("The audio buffer lost synchronization.");
         return;
@@ -503,9 +624,11 @@ unsigned Audio::stem_volume(unsigned index) const {
     if (stems_[index].clip) {
         return fade_volume_; // SDL clip gain is already applied to its PCM.
     }
-    const float level = index == 1 || (index == 0 && guitar_controls_backing_) ? guitar_level_ * guitar_gate_ :
-                        index == 0 ? song_level_ : rhythm_level_;
-    const float linear = level * fade_volume_ / 100.0f;
+    const bool guitar = index == 1 || (index == 0 && guitar_controls_backing_);
+    const unsigned level = guitar ? guitar_level_ : index == 0 ? song_level_ : rhythm_level_;
+    // The reference quantizes the configured level to SDL_mixer's 0–128 scale.
+    const auto sdl_level = level * 128 / 100;
+    const float linear = sdl_level * fade_volume_ * (guitar ? guitar_gate_ : 1.0f) / 128.0f;
     // KOS truncates its logarithmic AICA attenuation. Bias by half a hardware
     // step (2^(-1/32)) so intermediate gains round towards the requested level.
     return linear >= 255.0f ? 255u : static_cast<unsigned>(linear * 0.97857206f + 0.5f);
@@ -547,6 +670,17 @@ void Audio::guitar_gain(float gate, bool picked) {
     }
 }
 
+void Audio::restore_backing_gain() {
+    if (guitar_controls_backing_) {
+        guitar_controls_backing_ = false;
+        update_volume();
+    }
+}
+
+unsigned Audio::backing_level() const {
+    return guitar_controls_backing_ ? unsigned(guitar_level_ * guitar_gate_) : song_level_;
+}
+
 void Audio::fade_out(unsigned duration_ms) {
     if (!active_ || fade_duration_ms_) {
         return;
@@ -561,7 +695,7 @@ void Audio::fade_out(unsigned duration_ms) {
 }
 
 int Audio::position_ms() const {
-    return rate_ ? static_cast<int>(uint64_t(played_frames_) * 1000 / rate_) : 0;
+    return static_cast<int>(uint64_t(played_frames_) * 1000 / sample_rate);
 }
 
 void Audio::stop() {
@@ -595,6 +729,7 @@ void Audio::close_stem(Stem &stem) {
     stem.clip = nullptr;
     std::free(stem.read_buffer);
     stem.read_buffer = nullptr;
+    stem.resampler.reset();
     stem.channels = stem.frames = stem.decoded = 0;
 }
 

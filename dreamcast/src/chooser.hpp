@@ -13,6 +13,7 @@ public:
     bool enter();
     bool parent();
     bool matches() const;
+    bool matches(const SongEntry &item) const;
 
     const std::vector<SongEntry> &items() const { return items_; }
     unsigned selected() const { return selected_; }
@@ -23,8 +24,6 @@ public:
 
 private:
     void refresh(const std::string &previous);
-    bool matches(const SongEntry &item) const;
-
     const std::vector<SongEntry> *songs_ = nullptr;
     std::string path_, query_, folded_;
     std::vector<SongEntry> items_;

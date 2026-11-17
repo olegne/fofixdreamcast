@@ -19,6 +19,7 @@ struct SongEntry {
     uint32_t cassette_color = 0;
     bool blank_chart = false;
     int library_count = -1;
+    std::string cassette_label = {};
 };
 
 std::vector<SongEntry> song_library();
