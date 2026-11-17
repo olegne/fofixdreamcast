@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
@@ -25,6 +26,7 @@ private:
 class Audio {
 public:
     using PrepareService = void (*)();
+    using ClipVoices = std::array<Audio *, 8>;
 
     ~Audio() { stop(); }
     bool start(const char *backing, const char *guitar = nullptr, const char *rhythm = nullptr);
@@ -34,6 +36,7 @@ public:
     bool play_prepared();
     void poll();
     bool pause();
+    static void pause_clips(const ClipVoices &voices);
     bool resume();
     void stop();
     void set_mix(unsigned guitar, unsigned song, unsigned rhythm);
@@ -105,6 +108,7 @@ private:
     void queue_start();
     unsigned stem_volume(unsigned index) const;
     void update_volume();
+    bool clip_channels_playing() const;
     bool halt();
     void fail(const char *message);
 
@@ -116,6 +120,7 @@ private:
     bool paused_ = false;
     bool clock_ready_ = false;
     bool prepared_ = false;
+    bool clip_stop_pending_ = false;
     unsigned length_frames_ = 0;
     unsigned played_frames_ = 0;
     unsigned ring_origin_ = 0;

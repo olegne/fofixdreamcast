@@ -149,12 +149,9 @@ public:
     }
 
     void pause() {
-        poll();
-        for (const auto &voice : voices_) {
-            if (voice && voice->playing()) {
-                voice->pause();
-            }
-        }
+        dc::Audio::ClipVoices voices;
+        std::transform(voices_.begin(), voices_.end(), voices.begin(), [](const auto &voice) { return voice.get(); });
+        dc::Audio::pause_clips(voices);
     }
 
     void resume() {
@@ -169,7 +166,7 @@ private:
     unsigned guitar_level_ = 100;
     unsigned miss_level_ = 25;
     std::array<dc::AudioClip, effect_count> samples_;
-    std::array<std::unique_ptr<dc::Audio>, 8> voices_;
+    std::array<std::unique_ptr<dc::Audio>, std::tuple_size_v<dc::Audio::ClipVoices>> voices_;
 };
 
 struct Cue {
@@ -1515,7 +1512,8 @@ int main() {
                     break;
                 }
                 if (!frame.results_actions) {
-                    if (confirm || cancel || (frame.input == dc::InputDevice::keyboard && (pressed & pick_up))) {
+                    if (confirm || cancel ||
+                        (frame.input == dc::InputDevice::keyboard && (pressed & (pick_up | pick_down)))) {
                         if (!cheated && scores.qualifies(record_song, frame.difficulty, round.score)) {
                             kbd_set_repeat_timing(300, 30);
                             if (auto *device = maple_enum_type(0, MAPLE_FUNC_KEYBOARD)) {

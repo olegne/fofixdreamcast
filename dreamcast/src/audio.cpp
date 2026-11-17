@@ -486,6 +486,13 @@ void Audio::poll() {
     if (!active_) {
         return;
     }
+    if (clip_stop_pending_) {
+        if (!clip_channels_playing()) {
+            active_ = false;
+            stop();
+        }
+        return;
+    }
     const auto now = timer_us_gettime64();
     constexpr auto safe_poll_interval = uint64_t(ring_frames - block_frames) * 1000000 / sample_rate;
     if (now - last_poll_us_ >= safe_poll_interval) {
@@ -535,6 +542,133 @@ void Audio::poll() {
     }
 }
 
+bool Audio::clip_channels_playing() const {
+    const auto &clip = stems_[0];
+    return snd_is_playing(clip.channel[0]) || snd_is_playing(clip.channel[1]);
+}
+
+void Audio::pause_clips(const ClipVoices &voices) {
+    struct Latch {
+        Audio *voice = nullptr;
+        uint64_t published_at = 0;
+        bool tracking = false;
+    };
+    std::array<Latch, std::tuple_size_v<ClipVoices>> latches{};
+    const auto capture_cursor = [](Latch &latch, bool measure_time) {
+        auto &voice = *latch.voice;
+        const auto cursor = unsigned(snd_get_pos(voice.stems_[0].channel[0])) & (ring_frames - 1);
+        const auto advance = (cursor - voice.last_cursor_) & (ring_frames - 1);
+        if (cursor && advance && advance < ring_frames - block_frames) {
+            if (measure_time) {
+                latch.published_at = timer_us_gettime64();
+            }
+            voice.last_cursor_ = cursor;
+            voice.played_frames_ = std::min(voice.length_frames_, voice.played_frames_ + advance);
+        }
+    };
+    unsigned count = 0;
+    for (auto *voice : voices) {
+        if (!voice || !voice->active_ || !voice->stems_[0].clip || voice->clip_stop_pending_) {
+            continue;
+        }
+        voice->poll();
+        if (voice->active_) {
+            auto &latch = latches[count++];
+            latch.voice = voice;
+            latch.tracking = voice->clock_ready_;
+            if (latch.tracking) {
+                capture_cursor(latch, false);
+            }
+        }
+    }
+    if (!count) {
+        return;
+    }
+
+    // The ARM samples all channels before it drains the command queue.
+    // Establish a fresh sample timestamp with a single window for the batch.
+    const auto latch_deadline = timer_us_gettime64() + 5200;
+    while (timer_us_gettime64() < latch_deadline) {
+        bool waiting = false;
+        for (unsigned i = 0; i < count; ++i) {
+            auto &latch = latches[i];
+            if (latch.tracking) {
+                capture_cursor(latch, true);
+                waiting |= !latch.published_at;
+            }
+        }
+        if (!waiting) {
+            break;
+        }
+        timer_spin_delay_us(16);
+    }
+
+    AicaCommand cmd;
+    snd_sh4_to_aica_stop();
+    for (unsigned i = 0; i < count; ++i) {
+        for (const auto channel : latches[i].voice->stems_[0].channel) {
+            cmd.send(channel, AICA_CH_CMD_STOP);
+        }
+    }
+    snd_sh4_to_aica_start();
+
+    const auto stop_started = timer_us_gettime64();
+    for (;;) {
+        bool waiting = false;
+        bool tracking = false;
+        const bool precise = timer_us_gettime64() - stop_started < 12000;
+        for (unsigned i = 0; i < count; ++i) {
+            auto &latch = latches[i];
+            if (!latch.voice) {
+                continue;
+            }
+            auto &voice = *latch.voice;
+            const auto &channels = voice.stems_[0].channel;
+            const bool playing = snd_is_playing(channels[0]);
+            if (precise && latch.tracking) {
+                if (playing) {
+                    capture_cursor(latch, true);
+                    tracking = true;
+                } else {
+                    const auto since_publish = timer_us_gettime64() - latch.published_at;
+                    if (latch.published_at && since_publish < 4000) {
+                        const auto advance = unsigned(since_publish * sample_rate / 1000000);
+                        voice.played_frames_ = std::min(voice.length_frames_, voice.played_frames_ + advance);
+                    }
+                    latch.tracking = false;
+                }
+            }
+            if (playing || snd_is_playing(channels[1])) {
+                waiting = true;
+            } else {
+                voice.active_ = false;
+                voice.paused_ = true;
+                latch.voice = nullptr;
+            }
+        }
+        if (!waiting) {
+            return;
+        }
+        if (timer_us_gettime64() - stop_started >= 50000) {
+            // Keep ownership of unacknowledged channels. poll() releases them
+            // once the pending KEYOFF takes effect.
+            for (auto &latch : latches) {
+                if (latch.voice) {
+                    latch.voice->clip_stop_pending_ = true;
+                    latch.voice->error_ = "The AICA did not stop.";
+                }
+            }
+            std::puts("FoFiXDC: The AICA did not stop all effects.");
+            return;
+        }
+        if (tracking) {
+            timer_spin_delay_us(16);
+        } else {
+            thd_sleep(1);
+        }
+    }
+}
+
 bool Audio::halt() {
     if (!active_) {
         return true;
@@ -568,6 +702,10 @@ bool Audio::halt() {
 bool Audio::pause() {
     if (!active_) {
         return false;
+    }
+    if (stems_[0].clip) {
+        pause_clips({this});
+        return paused_;
     }
     if (!halt()) {
         fail("The AICA did not stop.");
@@ -700,6 +838,7 @@ int Audio::position_ms() const {
 
 void Audio::stop() {
     halt();
+    clip_stop_pending_ = false;
     paused_ = false;
     prepared_ = false;
     fade_volume_ = 255;

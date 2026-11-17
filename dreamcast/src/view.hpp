@@ -10,6 +10,7 @@
 #include "settings.hpp"
 #include "language.hpp"
 #include "song_library.hpp"
+#include "stage_transition.hpp"
 #include <array>
 #include <dc/pvr.h>
 #include <vector>
@@ -96,7 +97,7 @@ private:
         neck, strings, bars, tail, glow, ball_on, ball_off,
         star, star_off, mult2, mult3, mult4, font, title_font,
         tutorial_pose, tutorial_keyboard, tutorial_escape, font_intl, title_intl,
-        light_flame_one, light_flame_two, custom_label_a, custom_label_b, custom_label_c, texture_count
+        light_flame_one, light_flame_two, custom_label_a, custom_label_b, custom_label_c, stage_fade, texture_count
     };
 
     struct Texture {
@@ -176,7 +177,10 @@ private:
     void draw_cassettes(const Frame &frame, const std::vector<SongEntry> &library, bool stickers);
     bool prepare_note_mesh(const char *name, NoteMesh &mesh);
     bool prepare_frets();
-    void fret_vertices(unsigned lane, float weight, std::vector<pvr_vertex_t> &vertices) const;
+    void fret_vertices(unsigned lane, float weight, std::vector<pvr_vertex_t> &vertices,
+                       float visibility = 1.0f) const;
+    void draw_frets(bool strumming, float visibility, bool transparent);
+    void draw_tracks(float visibility);
     void update_frets(const Frame &frame, const Round &round);
     void draw_fret_glows(const Frame &frame, const Chord *held);
     void material(const pvr_poly_hdr_t &header);
@@ -188,6 +192,7 @@ private:
     void board_quad(TextureId id, float x0, float x1, float y, float z0, float z1,
                     float u0, float v0, float u1, float v1,
                     uint32_t back = 0xffffffff, uint32_t front = 0xffffffff);
+    void draw_board_bar(float y, float z, float opacity, uint32_t color);
     pvr_vertex_t board_vertex(float x, float y, float z, float u, float v, uint32_t color,
                               bool last, float bias = 0.0f) const;
     void select_language(unsigned index);
@@ -214,10 +219,10 @@ private:
     void world(const Frame &frame, const Round &round, const Chart &chart,
                const GuitarVisualFrame &timing);
     void update_stage_beat(int time_ms);
-    void stage_decoration(int time_ms);
-    void stage_lights(const Frame &frame, const Round &round);
+    void stage_decoration();
+    void stage_lights();
     bool prepare_light_stage();
-    void draw_light_stage(int time_ms, const Round &round);
+    void draw_light_stage();
     void draw_stats(const Frame &frame, const Round &round, const Rules &rules);
     void multiplier_effect(const Frame &frame, const Round &round, float song_period);
     void update_menu_clock(const Frame &frame);
@@ -269,6 +274,12 @@ private:
     size_t recent_pick_count_ = 0;
     size_t beat_lane_count_ = 1;
     GuitarVisualClock guitar_clock_;
+    StageTransition stage_transition_;
+    int stage_time_ms_ = 0;
+    int stage_pick_ms_ = 0;
+    int stage_miss_ms_ = 0;
+    bool stage_strumming_ = false;
+    float bar_coverage_ = 0.0f;
     bool light_stage_attempted_ = false;
     int last_multiplier_ms_ = -1;
     uint64_t guitar_time_origin_ms_ = 0;
