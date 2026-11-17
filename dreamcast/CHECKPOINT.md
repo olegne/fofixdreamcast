@@ -1,5 +1,41 @@
 # Checkpoint do Frets on Fire clássico
 
+## Editor, ranking, efeitos e qualificação da execução
+
+Código na branch `dreamcast-classic`, commit `d302454082be640b2bd004d22635d178c75c52f8`, árvore `f6e75f09c9b82e2d9fe2d102f2e2e273ba8e46da`. Compilação com KallistiOS 2.2.1, GCC SH-4 15.1.0, SH4ZAM, libvorbis, libogg e zlib. Comando `make -C dreamcast cdi CLASSIC_DATA=/caminho/para/data` com `CXXFLAGS="-std=c++17 -Wall -Wextra -Werror -MMD -MP -DFRETSONFIRE_INPUT_TRACE"`. Foram verificados os 26 arquivos originais do repertório e os 21 efeitos Ogg. O ROM disk do executável extraído da CDI foi comparado ao do ELF.
+
+| Artefato de diagnóstico | SHA-256 |
+| --- | --- |
+| ELF | `c66f534fed0a0173af6493497d3f4963c7983b4c92e0c8a697848b5951239bc3` |
+| CDI | `bf852ccc884847c1d929f3bc8e0fa2f6b314f7b65919d95f05688894144f27ba` |
+
+### Partidas completas no Flycast
+
+Os quatro replays na mesma CDI passaram pela pausa, retomada, resultado e nova partida. As 40.290 atualizações de placar e todos os alvos coincidiram com o Linux no relógio efetivo do jogo. O replay verificou as 5.142 transições do teclado do SDL pelos estados recebidos no Maple. A espera no teste pode deslocar a entrada de alguns trechos muito densos. A comparação reaplica esses horários e há um ensaio separado de regras com sequência comum.
+
+| Música e dificuldade | Bordas no Maple / SDL | Pontos | Atualizações iguais | Faltas SDL após começar a música | Quadro mais longo |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Defy The Machine · Amazing | 2256/2256 | 99.889 | 9125/9125 | 0 | 110,75 ms |
+| Bang Bang, Mystery Man · Medium | 852/852 | 116.101 | 10882/10882 | 0 | 98,25 ms |
+| This Week I've Been Mostly Playing Guitar · Amazing | 1804/1804 | 163.174 | 11536/11536 | 0 | 103,36 ms |
+| Tutorial · Medium | 230/230 | 3.143 | 8747/8747 | 0 | 41,46 ms |
+
+Uma tomada de controle do Tutorial com pulsos fixos na mesma CDI recebeu 230/230 bordas, sem faltas durante a execução. O placar foi 4.293 em ambos e os 8.751 avanços de placar coincidiram depois de reaplicar o relógio.
+
+O perfil de captura usou dois workers de renderização, fila SDL de 16.384 amostras, pontos de captura e PCM estereofônico. A fila ampliada cobre hiatos do host e acrescenta latência de captura. A mediana observada ficou por volta de 0,4 s no host. O perfil sem vídeo contínuo reduz a carga. A sonda encontrou zero faltas após o início da música e 15 blocos durante o boot das quatro sessões. O teste de controle com um hiato de produtor de 210 ms isolou os cortes da fila do host. Os 37.146.624 quadros de PCM válido coincidiram byte a byte na entrada e na saída do callback.
+
+### Verificação das mudanças
+
+- O relógio visual acompanha a suavização original nas mudanças de andamento. Em 2.681 quadros com mudança de BPM, pausa, sustain e reinício, os 53 gatilhos coincidiram e o erro máximo de período foi 0,001282 ms. Em torno de 3 s de Defy, o dither reduziu a diferença média de verde nas duas luminárias e nos dois cones examinados, sem trocar a quantidade de VRAM. Permanecem diferenças finas de filtragem, contorno e deslizamento na entrada e saída do palco.
+- O mixer aceita stems entre 8 e 48 kHz no relógio de 44,1 kHz. O ensaio simultâneo de 48, 32 e 22,05 kHz reproduziu os cinco canais físicos de stem no AICA emulado. O seek de 127 ms teve 4.032 amostras por canal iguais às da reprodução contínua e o maior erro de ganho contra o Linux foi 0,109 ponto percentual. O FFmpeg gerou uma trilha curta com EOF limpo 12 amostras antes do total declarado. Com a correção, Bang Bang de teste terminou aos 3.000 ms. O ajuste experimental da retomada de efeitos, exercitado separadamente, reduziu a repetição de cerca de 1,8 ms para até cinco amostras na sonda e ainda precisa de validação com as vozes simultâneas e o ARM físico.
+- O editor mostra e grava capas na VMU, conserva a edição de atraso A/V e usa a janela de 12 intervalos do estimador original. Um teste a 120 BPM deu 119,721 BPM com as batidas do Flycast. Após reiniciar, o port restaurou a capa e −137 ms de A/V, com os mesmos 49 bytes do MIDI. Nove janelas de PCM antes da fila SDL tiveram zero amostras de deriva no ensaio de gravação.
+- A compilação importa as tabelas clássicas do perfil Linux. No teste, os dois recordes importados apareceram junto ao resultado novo digitado via Maple como `João Ç Í`. O nome voltou da VMU após reiniciar, e um save antigo também abriu. Uma alteração de notas usa seu próprio ranking identificado pelo MIDI ativo.
+- O ranking começa desligado. O servidor local recebeu o mesmo formato do original e respondeu com posição 17 numa partida de 98 pontos. Com o envio desligado, a mesma CDI registrou o recorde e fez zero requisições. O serviço histórico e o adaptador físico ficam pendentes.
+- Os menus usam 95 métricas ASCII iguais ao SDL_ttf de referência, rotação nas transições e fita filtrada. O título de dificuldade mediu 314 × 36 px tanto no Linux quanto no Flycast. Os 16 idiomas, incluindo inglês, foram exercitados com quatro combinações de temas. Segurar Down por 21 VBlanks fez o menu avançar do primeiro ao quarto item. As dez combinações de regras passaram novamente com 5.662 eventos iguais e a prova de autoplay passou nos quatro charts em 168.084 atualizações.
+
+O [roteiro de bancada](README.md#validação-no-dreamcast-físico) reúne os testes físicos ainda pendentes. A [matriz](PARIDADE.md) conserva as diferenças de apresentação, o limite de comparação das fontes de sistema e o estado dos DVDs comerciais opcionais. O site oficial do original ainda documenta o [servidor de recordes para rede própria](https://fretsonfire.sourceforge.net/documentation/charts/).
+
+
 ## Perspectiva das notas e integração de recursos clássicos
 
 Código da candidata de diagnóstico na branch `dreamcast-classic`, commit `641314b904cea46e7d9c083d94fc72e0e4fedb97`, árvore `963894227e50ef3230616b0736df07dc5c12d58f`. O build usa KallistiOS 2.2.1, GCC SH-4 15.1.0, SH4ZAM, libvorbis, libogg e zlib. Foi gerado com `make -C dreamcast cdi CLASSIC_DATA=/caminho/para/data`, `CXXFLAGS="-std=c++17 -Wall -Wextra -Werror -MMD -MP -DFRETSONFIRE_INPUT_TRACE"` e a pasta `songs` do pacote 1.3.110 para Linux. O pacote de teste distribui as três faixas originais e o Tutorial. A extração da própria CDI bateu byte a byte com os 26 arquivos originais do repertório. O ROM disk do ELF coincide com o do executável extraído da CDI. Os 21 efeitos sonoros Ogg mantêm os bytes do pacote Linux.

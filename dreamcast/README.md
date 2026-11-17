@@ -89,6 +89,15 @@ make -C dreamcast cdi CLASSIC_DATA="/caminho/Frets on Fire-1.3.110/data" \
   SONGS_DIR="$PWD/minha-biblioteca"
 ```
 
+## Validação no Dreamcast físico
+
+Use o mesmo código e o SHA-256 da CDI registrados no checkpoint. Ligue um teclado Maple na porta A e uma VMU no primeiro slot de um controle na porta B. Registre o modo de vídeo usado e mantenha a comparação com Linux em 4:3.
+
+1. Inicialize a frio, abra o tutorial e faça um acorde com três teclas F. Alterne Enter e Shift direito. Pause e retome durante uma nota longa e reinicie a faixa.
+2. Termine as três músicas da biblioteca e confira som, resultado e nova partida. Escute os dois canais. Registre a posição na música se houver corte, atraso ou desvio.
+3. Digite um nome com acento, grave os recordes, altere o atraso A/V e reinicie para ver se os valores voltaram. Para a prova do editor, salve também a seleção de capa e reabra o chart.
+4. Para o ensaio de rede, conecte o adaptador e use a CDI com o endereço de um servidor compatível da rede local. Confirme uma partida com envio desligado e outra com envio ligado. Compare o resultado na tela com o que o servidor recebeu.
+
 A [referência de PC](REFERENCIA_PC.md) identifica a versão, os recursos e as dependências. O [inventário do Linux](ESCOPO_LINUX.md) cobre os menus e modos originais. A [matriz de paridade](PARIDADE.md) registra os resultados por recurso. O [checkpoint de compilação](CHECKPOINT.md) identifica os binários testados.
 
 O código do port segue a GPL, versão 2 ou posterior. O pacote clássico fornece os créditos e as licenças dos recursos usados em `copying.txt`.
