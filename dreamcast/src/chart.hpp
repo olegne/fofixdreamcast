@@ -76,6 +76,7 @@ public:
     Pick advance(const Chart &chart, int time_ms, uint8_t held, const Rules &rules);
     Pick pick(const Chart &chart, int time_ms, uint8_t held, const Rules &rules, bool tap);
     Pick fret_edge(const Chart &chart, int time_ms, uint8_t held, const Rules &rules, bool released);
+    void release_input(int time_ms, const Rules &rules);
     void finish(const Chart &chart, int time_ms, const Rules &rules);
     uint8_t required_frets(const Chart &chart, int time_ms, const Rules &rules) const;
     unsigned multiplier() const;

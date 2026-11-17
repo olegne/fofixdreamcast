@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstdint>
 #include <memory>
+#include <kos/fs.h>
 #define OV_EXCLUDE_STATIC_CALLBACKS
 #include <vorbis/vorbisfile.h>
 
@@ -84,8 +85,13 @@ private:
     struct Stem {
         OggVorbis_File decoder{};
         std::FILE *file = nullptr;
+        file_t cd_file = FILEHND_INVALID;
         PrepareService service = nullptr;
         char *read_buffer = nullptr;
+        size_t file_size = 0;
+        size_t file_position = 0;
+        size_t read_buffer_start = 0;
+        size_t read_buffer_count = 0;
         const AudioClip *clip = nullptr;
         int channel[2] = {-1, -1};
         uint32_t address[2] = {};
@@ -98,6 +104,9 @@ private:
     };
 
     bool open(Stem &stem, const char *path, PrepareService service);
+    static size_t read_file(Stem &stem, void *dst, size_t size, size_t count);
+    static int close_file(Stem &stem);
+    static int seek_file(Stem &stem, ogg_int64_t offset, int whence);
     bool allocate_channels(Stem &stem);
     static void close_stem(Stem &stem);
     static bool seek(Stem &stem, unsigned frame);

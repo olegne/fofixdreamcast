@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <limits>
 #include <malloc.h>
 #include <memory>
@@ -148,6 +149,14 @@ public:
         }
     }
 
+    void stop() {
+        for (const auto &voice : voices_) {
+            if (voice && (voice->playing() || voice->paused())) {
+                voice->stop();
+            }
+        }
+    }
+
     void pause() {
         dc::Audio::ClipVoices voices;
         std::transform(voices_.begin(), voices_.end(), voices.begin(), [](const auto &voice) { return voice.get(); });
@@ -252,6 +261,7 @@ struct Input {
     dc::InputDevice device = dc::InputDevice::none;
     unsigned buttons = 0;
     uint8_t frets = 0;
+    unsigned generation = 0;
 };
 
 constexpr unsigned fret_shift = 14;
@@ -293,16 +303,7 @@ Input read_keyboard(const kbd_state_t &keys) {
     return {dc::InputDevice::keyboard, held & button_mask, uint8_t(held >> fret_shift)};
 }
 
-Input read_input() {
-    if (const auto *keys = kbd_get_state(maple_enum_type(0, MAPLE_FUNC_KEYBOARD))) {
-        return read_keyboard(*keys);
-    }
-
-    auto *controller = maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
-    const auto *pad = controller ? static_cast<cont_state_t *>(maple_dev_status(controller)) : nullptr;
-    if (!pad) {
-        return {};
-    }
+Input read_controller(const cont_state_t &pad) {
     Input input{dc::InputDevice::controller};
     constexpr struct {
         unsigned key;
@@ -314,13 +315,13 @@ Input read_input() {
         {CONT_B, cancel_option}
     };
     for (const auto &binding : bindings) {
-        if (pad->buttons & binding.key) {
+        if (pad.buttons & binding.key) {
             input.buttons |= binding.buttons;
         }
     }
-    input.frets = (pad->ltrig >= 96 ? 1u << 0 : 0) | (pad->buttons & CONT_X ? 1u << 1 : 0) |
-                  (pad->buttons & CONT_Y ? 1u << 2 : 0) | (pad->buttons & CONT_B ? 1u << 3 : 0) |
-                  (pad->rtrig >= 96 ? 1u << 4 : 0);
+    input.frets = (pad.ltrig >= 96 ? 1u << 0 : 0) | (pad.buttons & CONT_X ? 1u << 1 : 0) |
+                  (pad.buttons & CONT_Y ? 1u << 2 : 0) | (pad.buttons & CONT_B ? 1u << 3 : 0) |
+                  (pad.rtrig >= 96 ? 1u << 4 : 0);
     return input;
 }
 
@@ -332,10 +333,62 @@ struct KeyboardReport {
     uint8_t released_frets;
 };
 
-class KeyboardReports {
+class MapleInput {
 public:
     void start() {
         observer_ = this;
+        maple_detach_callback(MAPLE_FUNC_KEYBOARD | MAPLE_FUNC_CONTROLLER, source_detached);
+    }
+
+    Input snapshot(bool reset_reports = false) {
+        using Device = dc::InputDevice;
+        const auto irq = irq_disable();
+        // A detected keyboard owns input before its first GETCOND reply.
+        // Never wait for an absent or half-connected device to send a report.
+        auto *keyboard = maple_enum_type(0, MAPLE_FUNC_KEYBOARD);
+        auto *selected = keyboard ? keyboard : maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
+        const auto device = keyboard ? Device::keyboard : selected ? Device::controller : Device::none;
+        const bool changed = selected != source_ || device != device_ || detached_;
+        if (changed) {
+            source_ = selected;
+            device_ = device;
+            detached_ = false;
+            wait_for_release_ = bool(selected);
+            ++generation_;
+            read_ = written_;
+            previous_ = {device, 0, 0, generation_};
+            captured_key_ = 0;
+            raw_baseline_ = {};
+        }
+        Input input{device, 0, 0, generation_};
+        if (selected && selected->status_valid) {
+            if (keyboard) {
+                const auto &keys = *kbd_get_state(keyboard);
+                if (keyboard_ready(keys)) {
+                    input = read_keyboard(keys);
+                }
+            } else {
+                const auto &pad = *static_cast<const cont_state_t *>(selected->status);
+                const auto state = read_controller(pad);
+                wait_for_release_ = wait_for_release_ && (state.buttons || state.frets);
+                if (!wait_for_release_) {
+                    input = state;
+                }
+            }
+        }
+        input.generation = generation_;
+        if (reset_reports) {
+            read_ = written_;
+            previous_ = input;
+        }
+        const int port = selected ? selected->port : -1;
+        irq_restore(irq);
+        if (changed) {
+            std::printf("FoFDC: input source=%s port=%c\n",
+                        device == Device::keyboard ? "keyboard" : device == Device::controller ? "controller" : "none",
+                        port >= 0 ? 'A' + port : '-');
+        }
+        return input;
     }
 
     static void observe_poll(maple_frame_t *frame) {
@@ -353,8 +406,8 @@ public:
     }
 
     void capture(maple_device_t *dev, uint64_t timestamp_us) {
-        const auto *keys = kbd_get_state(dev);
-        if (!keys) {
+        const auto *keys = active_keyboard();
+        if (!keys || dev != source_ || !keyboard_ready(*keys)) {
             return;
         }
         if (capturing_key_ && !captured_key_) {
@@ -368,7 +421,8 @@ public:
             }
             raw_baseline_ = held;
         }
-        const auto state = read_keyboard(*keys);
+        auto state = read_keyboard(*keys);
+        state.generation = generation_;
         if (state.buttons == previous_.buttons && state.frets == previous_.frets) {
             return;
         }
@@ -385,7 +439,7 @@ public:
 
     void capture_next_key() {
         const auto irq = irq_disable();
-        raw_baseline_ = raw_keys(kbd_get_state(maple_enum_type(0, MAPLE_FUNC_KEYBOARD)));
+        raw_baseline_ = raw_keys(active_keyboard());
         capturing_key_ = true;
         captured_key_ = 0;
         irq_restore(irq);
@@ -400,7 +454,7 @@ public:
 
     uint8_t take_captured_key() {
         const auto irq = irq_disable();
-        const auto key = captured_key_;
+        const auto key = !wait_for_release_ && active_keyboard() ? captured_key_ : 0;
         if (key) {
             captured_key_ = 0;
             capturing_key_ = false;
@@ -409,11 +463,21 @@ public:
         return key;
     }
 
-    void reset(const Input &state) {
+    int pop_key(kbd_region_t *region = nullptr) {
         const auto irq = irq_disable();
-        read_ = written_;
-        previous_ = state;
+        int key = KBD_QUEUE_END;
+        if (const auto *keyboard = active_keyboard(); keyboard && !wait_for_release_) {
+            if (region) {
+                *region = keyboard->region;
+            }
+            key = kbd_queue_pop(source_, false);
+        }
         irq_restore(irq);
+        return key;
+    }
+
+    void clear_keys() {
+        while (pop_key() != KBD_QUEUE_END) {}
     }
 
     bool pop(KeyboardReport &report, uint64_t through_us = std::numeric_limits<uint64_t>::max()) {
@@ -429,6 +493,30 @@ public:
     unsigned overflow = 0;
 
 private:
+    static void source_detached(maple_device_t *device) {
+        if (observer_ && device == observer_->source_) {
+            observer_->detached_ = true;
+        }
+    }
+
+    // Call with interrupts disabled so Maple cannot free the status buffer.
+    const kbd_state_t *active_keyboard() const {
+        return source_ && !detached_ && device_ == dc::InputDevice::keyboard &&
+               source_ == maple_enum_type(0, MAPLE_FUNC_KEYBOARD) ? kbd_get_state(source_) : nullptr;
+    }
+
+    bool keyboard_ready(const kbd_state_t &keys) {
+        if (wait_for_release_) {
+            // A held key can also repeat through the raw text queue. Discard
+            // those events until this keyboard sends its first neutral report.
+            while (kbd_queue_pop(source_, false) != KBD_QUEUE_END) {}
+            wait_for_release_ = keys.cond.modifiers.raw ||
+                std::any_of(std::begin(keys.cond.keys), std::end(keys.cond.keys),
+                            [](unsigned key) { return key != KBD_KEY_NONE; });
+        }
+        return !wait_for_release_;
+    }
+
     static std::array<uint8_t, KBD_MAX_PRESSED_KEYS + 8> raw_keys(const kbd_state_t *state) {
         std::array<uint8_t, KBD_MAX_PRESSED_KEYS + 8> keys{};
         if (state) {
@@ -448,7 +536,12 @@ private:
         observer_->capture(frame->dev, timestamp_us);
     }
 
-    static KeyboardReports *observer_;
+    static MapleInput *observer_;
+    maple_device_t *source_ = nullptr;
+    dc::InputDevice device_ = dc::InputDevice::none;
+    unsigned generation_ = 0;
+    bool detached_ = false;
+    bool wait_for_release_ = false;
     decltype(maple_frame_t::callback) original_reply_ = nullptr;
     Input previous_{dc::InputDevice::keyboard};
     std::array<KeyboardReport, 32> reports_{};
@@ -459,7 +552,7 @@ private:
     uint8_t captured_key_ = 0;
 };
 
-KeyboardReports *KeyboardReports::observer_ = nullptr;
+MapleInput *MapleInput::observer_ = nullptr;
 
 unsigned move_list(unsigned current, unsigned count, int direction) {
     return (current + count + direction % int(count)) % count;
@@ -549,14 +642,10 @@ void append_name_letter(std::string &name, unsigned char ch, size_t limit, size_
     }
 }
 
-NameCommand read_name_keys(std::string &name, uint64_t &last_key_ms, size_t limit,
+NameCommand read_name_keys(MapleInput &keyboard, std::string &name, uint64_t &last_key_ms, size_t limit,
                            Accent *composition = nullptr) {
-    auto *device = maple_enum_type(0, MAPLE_FUNC_KEYBOARD);
-    const auto *keyboard = kbd_get_state(device);
-    if (!keyboard) {
-        return NameCommand::editing;
-    }
-    for (int raw; (raw = kbd_queue_pop(device, false)) != KBD_QUEUE_END;) {
+    kbd_region_t region;
+    for (int raw; (raw = keyboard.pop_key(&region)) != KBD_QUEUE_END;) {
         last_key_ms = timer_ms_gettime64();
         const auto key = static_cast<kbd_key_t>(raw & 0xff);
         if (key == KBD_KEY_ENTER || key == KBD_KEY_F1) {
@@ -577,8 +666,9 @@ NameCommand read_name_keys(std::string &name, uint64_t &last_key_ms, size_t limi
         kbd_leds_t leds{};
         mods.raw = static_cast<uint8_t>(raw >> 8);
         leds.raw = static_cast<uint8_t>(raw >> 16);
-        const auto region = keyboard->region >= KBD_REGION_JP && keyboard->region <= KBD_REGION_ES
-                                ? keyboard->region : KBD_REGION_US;
+        if (region < KBD_REGION_JP || region > KBD_REGION_ES) {
+            region = KBD_REGION_US;
+        }
         if (composition && region == KBD_REGION_US) {
             const auto accent = us_accent(key, mods);
             if (accent != Accent::none) {
@@ -596,13 +686,9 @@ NameCommand read_name_keys(std::string &name, uint64_t &last_key_ms, size_t limi
     return NameCommand::editing;
 }
 
-void read_filter_keys(dc::SongChooser &chooser) {
-    auto *device = maple_enum_type(0, MAPLE_FUNC_KEYBOARD);
-    const auto *keyboard = kbd_get_state(device);
-    if (!keyboard) {
-        return;
-    }
-    for (int raw; (raw = kbd_queue_pop(device, false)) != KBD_QUEUE_END;) {
+void read_filter_keys(MapleInput &keyboard, dc::SongChooser &chooser) {
+    kbd_region_t region;
+    for (int raw; (raw = keyboard.pop_key(&region)) != KBD_QUEUE_END;) {
         const auto key = static_cast<kbd_key_t>(raw & 0xff);
         kbd_mods_t mods{};
         kbd_leds_t leds{};
@@ -611,22 +697,18 @@ void read_filter_keys(dc::SongChooser &chooser) {
         if (key == KBD_KEY_BACKSPACE) {
             chooser.type('\b');
         } else {
-            chooser.type(static_cast<unsigned char>(kbd_key_to_ascii(key, keyboard->region, mods, leds)));
+            chooser.type(static_cast<unsigned char>(kbd_key_to_ascii(key, region, mods, leds)));
         }
     }
 }
 
 enum class Cheat { none, autoplay, skip };
 
-Cheat read_cheat_keys(std::string &prefix, bool listen, bool *dismissed = nullptr) {
-    auto *device = maple_enum_type(0, MAPLE_FUNC_KEYBOARD);
-    if (!kbd_get_state(device)) {
-        return Cheat::none;
-    }
+Cheat read_cheat_keys(MapleInput &keyboard, std::string &prefix, bool listen, bool *dismissed = nullptr) {
     Cheat found = Cheat::none;
     constexpr char autoplay[] = "uptomytempo";
     constexpr char skip[] = "fastforward";
-    for (int raw; (raw = kbd_queue_pop(device, false)) != KBD_QUEUE_END;) {
+    for (int raw; (raw = keyboard.pop_key()) != KBD_QUEUE_END;) {
         const auto key = raw & 0xff;
         const unsigned handled = select_option | cancel_option | (3u << fret_shift);
         if (dismissed && (keyboard_bindings[key] & handled)) {
@@ -670,27 +752,26 @@ struct FrameTiming {
 } // namespace
 
 extern "C" int __wrap_maple_queue_frame(maple_frame_t *frame) {
-    KeyboardReports::observe_poll(frame);
+    MapleInput::observe_poll(frame);
     return __real_maple_queue_frame(frame);
 }
 
 int main() {
-    dc::View view;
-    if (!view.init()) {
-        std::puts("FoFDC: could not load the classic renderer");
-        return 1;
-    }
-
-    sounds.load();
-    KeyboardReports keyboard_reports;
-    keyboard_reports.start();
     maple_wait_scan();
     dc::Settings settings;
     settings.load();
+    dc::View view;
+    if (!view.init(settings.video)) {
+        std::puts("FoFDC: could not load the classic renderer");
+        return 1;
+    }
+    sounds.load();
     if (settings.language >= dc::Language::count()) {
         settings.language = 0;
     }
     apply_keyboard_settings(settings);
+    MapleInput maple_input;
+    maple_input.start();
     dc::ScoreBook scores;
     dc::ScoreUpload score_upload;
     scores.load();
@@ -748,7 +829,7 @@ int main() {
     unsigned song_index = 1;
     unsigned last_regular_song = 0;
     dc::SongChooser chooser;
-    unsigned previous_buttons = 0;
+    Input previous_input;
     Input processed_input;
     uint8_t blocked_frets = 0;
     int processed_time = 0;
@@ -759,10 +840,11 @@ int main() {
     bool closing_pause = false;
     uint64_t round_start_ms = 0;
     uint64_t results_start_ms = 0;
+    const char *results_taunt = nullptr;
     uint64_t name_key_ms = 0;
     Accent name_accent = Accent::none;
-    uint64_t name_frame_ms = 0;
-    bool closing_name = false;
+    uint64_t results_dialog_frame_ms = 0;
+    bool closing_results_dialog = false;
     unsigned name_letter = 0;
     uint64_t credits_start_ms = 0;
     uint64_t credits_close_ms = 0;
@@ -783,6 +865,7 @@ int main() {
     const auto apply_settings = [&] {
         frame.delay_ms = settings.delay_ms;
         frame.text_scale = settings.text_scale;
+        frame.half_refresh = settings.video.half_refresh;
         frame.lefty = settings.lefty;
         frame.tapping = settings.tapping;
         frame.language = settings.language;
@@ -814,6 +897,37 @@ int main() {
         frame.library_item = !chooser.selected() || chooser.folder();
         frame.selected = frame.library_item ? songs.size() : chooser.song_index();
     };
+    const auto load_sd_library = [&] {
+        menu_audio.stop();
+        sounds.stop();
+        result_audio.pause();
+        for (auto &preview : collection_audio) {
+            preview.stop();
+        }
+        std::vector<dc::SongEntry> playable, editable;
+        if (const char *error = dc::load_sd_song_library(playable, editable)) {
+            frame.editor_text = error;
+            std::printf("FoFDC: SD library: %s\n", error);
+            result_audio.resume();
+            return;
+        }
+        const auto playable_count = playable.size();
+        edits.load(playable);
+        edits.load(editable);
+        for (const auto &entry : editable) {
+            if (edits.has_playable_edit(entry)) {
+                playable.push_back(entry);
+            }
+            imports.push_back(entry);
+        }
+        songs.insert(songs.end(), std::make_move_iterator(playable.begin()), std::make_move_iterator(playable.end()));
+        song_difficulties.resize(songs.size(), -1);
+        loaded_chart = songs.size();
+        frame.editor_text = "SD card: " + std::to_string(playable_count) + " songs, " +
+                            std::to_string(editable.size()) + " imports.";
+        std::printf("FoFDC: %s\n", frame.editor_text.c_str());
+        result_audio.resume();
+    };
     const auto to_setlist = [&] {
         menu_audio.fade_out(1000);
         audio.stop();
@@ -827,9 +941,7 @@ int main() {
             return;
         }
         chooser.open(songs, last_regular_song);
-        if (auto *device = maple_enum_type(0, MAPLE_FUNC_KEYBOARD)) {
-            while (kbd_queue_pop(device, false) != KBD_QUEUE_END) {}
-        }
+        maple_input.clear_keys();
         frame.screen = dc::Screen::setlist;
         chooser_selection();
     };
@@ -983,7 +1095,7 @@ int main() {
         return true;
     };
     const auto begin_countdown = [&] {
-        read_cheat_keys(cheat_prefix, false);
+        maple_input.clear_keys();
         cheat_prefix.clear();
         frame.cheat_message = nullptr;
         cheated = autoplay = skip_round = false;
@@ -1015,10 +1127,10 @@ int main() {
         frame.duration_ms = (end_ms + 1500) / 1000 * 1000;
         countdown_start = timer_ms_gettime64();
         timing = {};
-        keyboard_reports.overflow = 0;
+        maple_input.overflow = 0;
         sounds.play(start_song);
     };
-    const auto begin_audio = [&] {
+    const auto begin_audio = [&](Input &input) {
         frame.countdown = 0;
         if (!audio.play_prepared()) {
             frame.screen = dc::Screen::error;
@@ -1028,37 +1140,15 @@ int main() {
         music_level = audio.backing_level();
         round_start_ms = timer_ms_gettime64();
         frame.time_ms = -frame.delay_ms - chart_delay_ms;
-        processed_input = read_input();
+        input = processed_input = maple_input.snapshot(true);
         blocked_frets = 0;
         processed_time = frame.time_ms;
-        keyboard_reports.reset(processed_input);
         frame.screen = dc::Screen::play;
         std::printf("FoFDC: playing difficulty=%u goals=%u gems=%u delay=%d chart_start=%d\n", frame.difficulty,
                     unsigned(song.guitar[frame.difficulty].size()), frame.gems, frame.delay_ms + chart_delay_ms,
                     frame.time_ms);
         std::printf("FoFDC: memory heap_used=%u vram_free=%u aica_free=%u\n",
                     unsigned(mallinfo().uordblks), unsigned(pvr_mem_available()), unsigned(snd_mem_available()));
-    };
-    const auto resume_audio = [&] {
-        // GuitarScene reloads the configured background volume before unpausing.
-        audio.restore_backing_gain();
-        if (audio.playing() || audio.resume()) {
-            music_level = audio.backing_level();
-            frame.screen = dc::Screen::play;
-            frame.time_ms = audio.position_ms() - frame.delay_ms - chart_delay_ms;
-            const auto input = read_input();
-            blocked_frets = input.device == dc::InputDevice::keyboard
-                                ? uint8_t(input.frets & ~processed_input.frets) : 0;
-            processed_input = input;
-            processed_input.frets &= ~blocked_frets;
-            processed_time = frame.time_ms;
-            keyboard_reports.reset(input);
-            timing.last = 0;
-            std::printf("FoFDC: resumed %d ms\n", audio.position_ms());
-        } else {
-            frame.screen = dc::Screen::error;
-            frame.error = audio.error();
-        }
     };
     const auto show_pause = [&] {
         result_audio.pause();
@@ -1096,22 +1186,84 @@ int main() {
         }
     };
 
+    const auto adopt_input_source = [&](const Input &input, int when, const dc::Rules &rules) {
+        if (processed_input.generation == input.generation) {
+            return;
+        }
+        if (!autoplay) {
+            round.release_input(when, rules);
+            record_pick(dc::Pick::neutral, when, 0);
+        }
+        processed_input = {input.device, 0, 0, input.generation};
+        blocked_frets = 0;
+    };
+
+    const auto resume_audio = [&](Input &input) {
+        // GuitarScene reloads the configured background volume before unpausing.
+        audio.restore_backing_gain();
+        if (audio.playing() || audio.resume()) {
+            music_level = audio.backing_level();
+            frame.screen = dc::Screen::play;
+            frame.time_ms = audio.position_ms() - frame.delay_ms - chart_delay_ms;
+            input = maple_input.snapshot(true);
+            adopt_input_source(input, frame.time_ms,
+                               dc::Rules{60000000.0f / song.initial_us_per_beat,
+                                         frame.delay_ms + chart_delay_ms, settings.tapping});
+            blocked_frets = uint8_t(input.frets & ~processed_input.frets);
+            processed_input = input;
+            processed_input.frets &= ~blocked_frets;
+            processed_time = frame.time_ms;
+            timing.last = 0;
+            std::printf("FoFDC: resumed %d ms\n", audio.position_ms());
+        } else {
+            frame.screen = dc::Screen::error;
+            frame.error = audio.error();
+        }
+    };
+
     for (;;) {
         frame.sustain_expired = false;
         const auto previous_screen = frame.screen;
-        const auto input = read_input();
-        const bool same_device = input.device == frame.input;
-        unsigned pressed = same_device && input.device == dc::InputDevice::controller ?
-                           input.buttons & ~previous_buttons : 0;
+        auto input = maple_input.snapshot();
+        const bool source_changed = input.generation != previous_input.generation;
+        unsigned pressed = !source_changed && input.device == dc::InputDevice::controller ?
+                           input.buttons & ~previous_input.buttons : 0;
         int step = menu_direction(pressed, false);
-        previous_buttons = input.buttons;
+        previous_input = input;
         unsigned menu_frets = 0;
         const auto &chart = song.guitar[frame.difficulty];
         const bool pause_menu = frame.screen == dc::Screen::pause ||
                                 (frame.screen == dc::Screen::settings && settings_in_pause);
+        if (source_changed) {
+            repeat_direction = 0;
+            settings_held_controls = 0;
+            cheat_prefix.clear();
+            name_accent = Accent::none;
+        }
+        const bool paused_song = pause_menu && frame.countdown <= 0;
+        if (paused_song && input.generation != processed_input.generation) {
+            adopt_input_source(input, frame.time_ms,
+                               dc::Rules{60000000.0f / song.initial_us_per_beat,
+                                         frame.delay_ms + chart_delay_ms, settings.tapping});
+        }
+        const auto release_paused_frets = [&](const Input &state, uint8_t released) {
+            if (!paused_song || !released || state.generation != processed_input.generation) {
+                return;
+            }
+            const dc::Rules rules{60000000.0f / song.initial_us_per_beat,
+                                  frame.delay_ms + chart_delay_ms, settings.tapping};
+            processed_input.frets &= ~released;
+            trace_input(InputTrace::report, frame.time_ms, state.buttons, state.frets, round);
+            record_pick(round.fret_edge(chart, frame.time_ms, processed_input.frets, rules, true),
+                        frame.time_ms, processed_input.frets);
+            trace_input(InputTrace::fret, frame.time_ms, 1, processed_input.frets, round);
+        };
+        if (input.device == dc::InputDevice::controller) {
+            release_paused_frets(input, uint8_t(processed_input.frets & ~input.frets));
+        }
         if (frame.screen != dc::Screen::play || input.device != dc::InputDevice::keyboard) {
             KeyboardReport report;
-            while (keyboard_reports.pop(report)) {
+            while (maple_input.pop(report)) {
                 if (input.device == dc::InputDevice::keyboard) {
                     pressed |= report.pressed;
                     menu_frets |= report.pressed_frets;
@@ -1119,17 +1271,7 @@ int main() {
                                            (report.state.buttons & select_option), true);
                     // Menu.keyPressed consumes presses. Its inherited
                     // keyReleased still passes fret releases to GuitarScene.
-                    if (pause_menu && frame.countdown <= 0 && report.released_frets &&
-                        processed_input.device == dc::InputDevice::keyboard) {
-                        const dc::Rules rules{60000000.0f / song.initial_us_per_beat,
-                                              frame.delay_ms + chart_delay_ms, settings.tapping};
-                        processed_input.frets &= ~report.released_frets;
-                        trace_input(InputTrace::report, frame.time_ms, report.state.buttons,
-                                    report.state.frets, round);
-                        record_pick(round.fret_edge(chart, frame.time_ms, processed_input.frets, rules, true),
-                                    frame.time_ms, processed_input.frets);
-                        trace_input(InputTrace::fret, frame.time_ms, 1, processed_input.frets, round);
-                    }
+                    release_paused_frets(report.state, report.released_frets);
                 }
             }
         }
@@ -1139,7 +1281,7 @@ int main() {
         const bool confirm = (pressed & select_option) || (menu_frets & (1u << 0));
         const bool cancel = (pressed & cancel_option) || (menu_frets & (1u << 1));
         const int held_direction = frame.input == dc::InputDevice::keyboard &&
-                                   repeats_menu_navigation(frame.screen, frame.results_name)
+                                   repeats_menu_navigation(frame.screen, frame.results_name || frame.results_warning)
                                        ? menu_direction(input.buttons, true) : 0;
         const auto navigation_now = timer_ms_gettime64();
         if (repeat_screen != frame.screen || repeat_direction != held_direction) {
@@ -1214,21 +1356,21 @@ int main() {
                     resume_menu_music();
                 }
                 if (settings_menu.capture) {
-                    const auto key = keyboard_reports.take_captured_key();
+                    const auto key = maple_input.take_captured_key();
                     if (key || (input.device == dc::InputDevice::controller && cancel)) {
                         const auto action = settings_menu.row(settings_menu.selected).action;
                         if (key && key != KBD_KEY_ESCAPE && key != settings.key(dc::KeyAction::cancel) &&
                             key != settings.key(dc::KeyAction::fret2)) {
                             settings.keys[unsigned(action)] = settings_menu.draft.keys[unsigned(action)] = key;
                             apply_keyboard_settings(settings);
-                            keyboard_reports.reset(read_input());
+                            maple_input.snapshot(true);
                             settings_dirty = true;
                             sounds.play(accept);
                             std::printf("FoFDC: Maple binding action=%u key=%02x\n", unsigned(action), key);
                         } else {
                             sounds.play(back);
                         }
-                        keyboard_reports.stop_key_capture();
+                        maple_input.stop_key_capture();
                         settings_menu.capture = false;
                         settings_held_controls = 0;
                     }
@@ -1317,18 +1459,22 @@ int main() {
                     case S::binding:
                         if (input.device == dc::InputDevice::keyboard) {
                             settings_menu.capture = true;
-                            keyboard_reports.capture_next_key();
+                            maple_input.capture_next_key();
                         }
                         break;
                     case S::apply:
                         settings = draft;
+                        menu_audio.stop();
+                        if (!view.configure_video(settings.video)) {
+                            std::puts("FoFDC: could not load the classic renderer");
+                            return 1;
+                        }
                         settings_dirty = true;
                         apply_settings();
                         music_level = 100;
                         save_settings();
                         training = false;
                         to_main();
-                        menu_audio.stop();
                         break;
                     default: break;
                 }
@@ -1357,7 +1503,7 @@ int main() {
             case dc::Screen::setlist: {
                 const bool quiet = !collection_audio[preview_channel].playing();
                 if (frame.input == dc::InputDevice::keyboard) {
-                    read_filter_keys(chooser);
+                    read_filter_keys(maple_input, chooser);
                 }
                 chooser.move(step);
                 if (quiet) {
@@ -1433,7 +1579,7 @@ int main() {
                             frame.screen = dc::Screen::countdown;
                             std::printf("FoFDC: returned to countdown=%.3f\n", double(frame.countdown));
                         } else {
-                            resume_audio();
+                            resume_audio(input);
                         }
                     }
                     break;
@@ -1463,32 +1609,47 @@ int main() {
                 break;
             }
             case dc::Screen::results: {
-                frame.results_age_ms = static_cast<unsigned>(timer_ms_gettime64() - results_start_ms);
+                const auto now = timer_ms_gettime64();
+                if (!results_start_ms) {
+                    if (view.stage_visible()) {
+                        break;
+                    }
+                    results_start_ms = now;
+                    result_audio.schedule(results_taunt);
+                }
+                frame.results_age_ms = static_cast<unsigned>(now - results_start_ms);
                 const auto &result_entry = songs[frame.result_song];
                 const auto &record_song = result_entry.midi;
-                if (frame.results_name) {
-                    const auto now = timer_ms_gettime64();
-                    const float transition = (now - name_frame_ms) / 512.0f;
-                    name_frame_ms = now;
-                    if (closing_name) {
-                        frame.name_visibility = std::max(0.0f, frame.name_visibility - transition);
-                        if (frame.name_visibility == 0.0f) {
-                            frame.highscore_rank = scores.add(record_song, frame.difficulty, round.score,
-                                                              round.rating(frame.gems), frame.score_name);
-                            if (frame.highscore_rank >= 0 && settings.upload_scores) {
-                                score_upload.start(scores, record_song, edits.midi_override(result_entry));
+                if (frame.results_name || frame.results_warning) {
+                    const float transition = (now - results_dialog_frame_ms) / 512.0f;
+                    results_dialog_frame_ms = now;
+                    if (closing_results_dialog) {
+                        frame.results_dialog_visibility = std::max(0.0f, frame.results_dialog_visibility - transition);
+                        if (frame.results_dialog_visibility == 0.0f) {
+                            if (frame.results_name) {
+                                frame.highscore_rank = scores.add(record_song, frame.difficulty, round.score,
+                                                                  round.rating(frame.gems), frame.score_name);
+                                if (frame.highscore_rank >= 0 && settings.upload_scores) {
+                                    score_upload.start(scores, record_song, edits.midi_override(result_entry));
+                                }
+                                kbd_set_repeat_timing(600, 20);
                             }
                             frame.results_name = false;
+                            frame.results_warning = false;
                             frame.results_actions = true;
-                            kbd_set_repeat_timing(600, 20);
                             std::puts("FoFDC: results actions opened");
                         }
                         break;
                     }
-                    frame.name_visibility = std::min(1.0f, frame.name_visibility + transition);
+                    frame.results_dialog_visibility = std::min(1.0f, frame.results_dialog_visibility + transition);
+                    if (frame.results_warning) {
+                        closing_results_dialog = confirm || cancel;
+                        break;
+                    }
                     NameCommand command = NameCommand::editing;
                     if (frame.input == dc::InputDevice::keyboard) {
-                        command = read_name_keys(frame.score_name, name_key_ms, dc::ScoreBook::max_name, &name_accent);
+                        command = read_name_keys(maple_input, frame.score_name, name_key_ms,
+                                                 dc::ScoreBook::max_name, &name_accent);
                     } else if (confirm || cancel) {
                         command = cancel ? NameCommand::cancel : NameCommand::accept;
                     } else {
@@ -1503,7 +1664,7 @@ int main() {
                         }
                     }
                     if (command != NameCommand::editing) {
-                        closing_name = true;
+                        closing_results_dialog = true;
                         if (command == NameCommand::cancel) {
                             frame.score_name = scores.name();
                         }
@@ -1514,24 +1675,28 @@ int main() {
                 if (!frame.results_actions) {
                     if (confirm || cancel ||
                         (frame.input == dc::InputDevice::keyboard && (pressed & (pick_up | pick_down)))) {
-                        if (!cheated && scores.qualifies(record_song, frame.difficulty, round.score)) {
-                            kbd_set_repeat_timing(300, 30);
-                            if (auto *device = maple_enum_type(0, MAPLE_FUNC_KEYBOARD)) {
-                                while (kbd_queue_pop(device, false) != KBD_QUEUE_END) {}
-                            }
-                            frame.score_name = scores.name();
-                            name_accent = Accent::none;
-                            frame.name_visibility = 0.0f;
-                            frame.results_name = true;
-                            frame.name_cursor = true;
-                            name_key_ms = name_frame_ms = timer_ms_gettime64();
-                            closing_name = false;
-                            name_letter = 0;
-                            frame.name_wheel = 'A';
-                            std::puts("FoFDC: high score prompt opened");
-                        } else {
+                        if (!scores.qualifies(record_song, frame.difficulty, round.score)) {
                             frame.results_actions = true;
                             std::puts("FoFDC: results actions opened");
+                        } else {
+                            frame.results_dialog_visibility = 0.0f;
+                            results_dialog_frame_ms = now;
+                            closing_results_dialog = false;
+                            if (cheated) {
+                                frame.results_warning = true;
+                                std::puts("FoFDC: cheat record warning opened");
+                            } else {
+                                kbd_set_repeat_timing(300, 30);
+                                maple_input.clear_keys();
+                                frame.score_name = scores.name();
+                                name_accent = Accent::none;
+                                frame.results_name = true;
+                                frame.name_cursor = true;
+                                name_key_ms = now;
+                                name_letter = 0;
+                                frame.name_wheel = 'A';
+                                std::puts("FoFDC: high score prompt opened");
+                            }
                         }
                     }
                     break;
@@ -1557,18 +1722,21 @@ int main() {
                 break;
             case dc::Screen::editor_menu:
                 resume_menu_music();
-                frame.selected = move_list(frame.selected, 3, step);
+                frame.selected = move_list(frame.selected, 4, step);
                 toggle(step);
                 if (cancel) {
                     to_main();
                     frame.selected = 2;
                 } else if (confirm) {
-                    sounds.play(accept);
                     frame.editor_text.clear();
+                    if (frame.selected == 3) {
+                        load_sd_library();
+                    }
+                    sounds.play(accept);
                     if (frame.selected == 0) {
                         to_setlist();
                         choose_for_editor = frame.screen == dc::Screen::setlist;
-                    } else {
+                    } else if (frame.selected != 3) {
                         frame.selected = 0;
                         frame.screen = dc::Screen::editor_import;
                     }
@@ -1673,16 +1841,14 @@ int main() {
                         frame.editor_text.clear();
                         frame.screen = dc::Screen::editor_message;
                     } else {
-                        if (auto *device = maple_enum_type(0, MAPLE_FUNC_KEYBOARD)) {
-                            while (kbd_queue_pop(device, false) != KBD_QUEUE_END) {}
-                        }
+                        maple_input.clear_keys();
                         frame.editor_text = editor.field(frame.selected);
                         frame.screen = dc::Screen::editor_value;
                     }
                 }
                 break;
             case dc::Screen::editor_value: {
-                const auto command = read_name_keys(frame.editor_text, name_key_ms, 60);
+                const auto command = read_name_keys(maple_input, frame.editor_text, name_key_ms, 60);
                 if (command == NameCommand::cancel || cancel) {
                     frame.screen = dc::Screen::editor_actions;
                 } else if (command == NameCommand::accept || confirm) {
@@ -1756,7 +1922,7 @@ int main() {
 
         bool dismiss_cheat = false;
         if (frame.screen == dc::Screen::play || frame.screen == dc::Screen::countdown) {
-            const auto cheat = read_cheat_keys(cheat_prefix, !frame.cheat_message,
+            const auto cheat = read_cheat_keys(maple_input, cheat_prefix, !frame.cheat_message,
                                                 frame.cheat_message ? &dismiss_cheat : nullptr);
             if (frame.cheat_message && (confirm || cancel || dismiss_cheat)) {
                 dismiss_cheat = true;
@@ -1786,7 +1952,7 @@ int main() {
             frame.time_ms = -remaining - frame.delay_ms - chart_delay_ms;
             if (remaining == 0) {
                 const auto overlay = frame.screen;
-                begin_audio();
+                begin_audio(input);
                 if (pause_layer && frame.screen == dc::Screen::play) {
                     frame.screen = overlay;
                     std::printf("FoFDC: countdown completed under pause\n");
@@ -1823,12 +1989,13 @@ int main() {
                     };
                     result_clip = responses[std::rand() % 3];
                 }
-                result_audio.schedule(result_clip);
                 frame.selected = 0;
-                results_start_ms = timer_ms_gettime64();
+                results_taunt = result_clip;
+                results_start_ms = 0;
                 frame.results_age_ms = 0;
                 frame.results_actions = false;
                 frame.results_name = false;
+                frame.results_warning = false;
                 frame.result_song = song_index;
                 frame.highscore_rank = -1;
                 score_upload.reset();
@@ -1839,7 +2006,7 @@ int main() {
                             timing.frames, round.hits, round.misses, round.overstrums, round.score);
                 std::printf("FoFDC: gems=%u/%u stars=%u frame_max_us=%u over25=%u over50=%u\n",
                             round.gem_hits, frame.gems, stars, timing.max_us, timing.over_25_ms, timing.over_50_ms);
-                std::printf("FoFDC: input_queue_overflow=%u\n", keyboard_reports.overflow);
+                std::printf("FoFDC: input_queue_overflow=%u\n", maple_input.overflow);
                 pvr_stats_t pvr_stats{};
                 if (pvr_get_stats(&pvr_stats) == 0) {
                     std::printf("FoFDC: pvr_vertex_peak=%u vram_free=%u aica_free=%u heap_used=%u\n",
@@ -1849,32 +2016,29 @@ int main() {
             } else {
                 const auto process_input = [&](Input state, int when, uint8_t releases = 0) {
                     trace_input(InputTrace::report, when, state.buttons, state.frets, round);
-                    if (state.device == processed_input.device) {
-                        const auto edges = state.buttons & ~processed_input.buttons;
-                        if (frame.cheat_message || dismiss_cheat) {
-                            processed_input.buttons = state.buttons;
-                            return true;
-                        }
-                        if (edges & pause_song) {
-                            return false;
-                        }
-                        blocked_frets &= state.frets;
-                        state.frets &= ~blocked_frets;
-                        if (state.frets != processed_input.frets || releases) {
-                            const bool released = releases || (processed_input.frets & ~state.frets);
-                            record_pick(round.fret_edge(chart, when, state.frets, rules, released),
+                    adopt_input_source(state, when, rules);
+                    const auto edges = state.buttons & ~processed_input.buttons;
+                    if (frame.cheat_message || dismiss_cheat) {
+                        processed_input.buttons = state.buttons;
+                        return true;
+                    }
+                    if (edges & pause_song) {
+                        return false;
+                    }
+                    blocked_frets &= state.frets;
+                    state.frets &= ~blocked_frets;
+                    if (state.frets != processed_input.frets || releases) {
+                        const bool released = releases || (processed_input.frets & ~state.frets);
+                        record_pick(round.fret_edge(chart, when, state.frets, rules, released),
+                                    when, state.frets);
+                        trace_input(InputTrace::fret, when, released, state.frets, round);
+                    }
+                    for (const auto pick : {pick_up, pick_down, pick_extra}) {
+                        if (edges & pick) {
+                            record_pick(round.pick(chart, when, state.frets, rules, false),
                                         when, state.frets);
-                            trace_input(InputTrace::fret, when, released, state.frets, round);
+                            trace_input(InputTrace::strum, when, pick, state.frets, round);
                         }
-                        for (const auto pick : {pick_up, pick_down, pick_extra}) {
-                            if (edges & pick) {
-                                record_pick(round.pick(chart, when, state.frets, rules, false),
-                                            when, state.frets);
-                                trace_input(InputTrace::strum, when, pick, state.frets, round);
-                            }
-                        }
-                    } else {
-                        blocked_frets = 0;
                     }
                     processed_input = state;
                     processed_time = when;
@@ -1886,13 +2050,13 @@ int main() {
                     // that sample's timestamp even when decoding takes a while.
                     const auto sampled_at_us = audio.position_sampled_at_us();
                     KeyboardReport report;
-                    while (keep_playing && keyboard_reports.pop(report, sampled_at_us)) {
+                    while (keep_playing && maple_input.pop(report, sampled_at_us)) {
                         const auto age_ms = (sampled_at_us - report.timestamp_us) / 1000;
                         keep_playing = process_input(report.state,
                                                      std::max(processed_time, frame.time_ms - int(age_ms)),
                                                      report.released_frets);
                     }
-                    if (keep_playing && processed_input.device != input.device) {
+                    if (keep_playing && processed_input.generation != input.generation) {
                         keep_playing = process_input(input, frame.time_ms);
                     }
                 } else if (interactive) {

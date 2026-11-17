@@ -14,6 +14,14 @@ enum class KeyAction : unsigned {
     left, right, up, down, cancel, count
 };
 
+struct VideoSettings {
+    bool low_resolution = false;
+    bool half_refresh = false;
+    bool horizontal_aa = false;
+
+    bool supersampled() const { return low_resolution && horizontal_aa; }
+};
+
 struct Settings {
     Settings();
     uint8_t key(KeyAction action) const { return keys[static_cast<unsigned>(action)]; }
@@ -31,6 +39,7 @@ struct Settings {
     bool lefty = false;
     bool tapping = true;
     bool upload_scores = false;
+    VideoSettings video;
 
     void load();
     void save() const;
@@ -85,6 +94,7 @@ struct SettingsMenu {
 bool valid_key(unsigned key);
 std::string key_name(unsigned key);
 bool setting_is_volume(Setting setting);
+bool setting_adjustable(const Settings &settings, Setting setting);
 bool adjust_setting(Settings &settings, Setting setting, int direction, unsigned languages);
 std::string setting_value(const Settings &settings, const SettingRow &row);
 

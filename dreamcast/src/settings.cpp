@@ -103,6 +103,9 @@ std::array<uint8_t, payload_size> encode(const Settings &settings, uint32_t gene
     bytes[17] = settings.lefty | (settings.tapping << 1);
     bytes[18] = settings.mods;
     bytes[19] = settings.upload_scores;
+    bytes[20] = settings.video.low_resolution;
+    bytes[21] = settings.video.half_refresh;
+    bytes[22] = settings.video.horizontal_aa;
     std::copy(settings.keys.begin(), settings.keys.end(), bytes.begin() + 24);
     return bytes;
 }
@@ -123,6 +126,7 @@ bool decode(const uint8_t *bytes, Settings &settings) {
     settings.tapping = bytes[17] & 2;
     settings.mods = bytes[18];
     settings.upload_scores = bytes[19] != 0;
+    settings.video = {bytes[20] != 0, bytes[21] != 0, bytes[22] != 0};
     std::copy_n(bytes + 24, settings.keys.size(), settings.keys.begin());
     const auto valid_volume = [](unsigned level) { return level <= 100 && level % 10 == 0; };
     return settings.delay_ms <= 300 && settings.text_scale >= 50 && settings.text_scale <= 250 &&
@@ -131,6 +135,7 @@ bool decode(const uint8_t *bytes, Settings &settings) {
            (settings.miss_level == 0 || settings.miss_level == 25 ||
             settings.miss_level == 50 || settings.miss_level == 100) &&
            settings.difficulty < 4 && bytes[17] <= 3 && settings.mods <= 3 && bytes[19] <= 1 &&
+           bytes[20] <= 1 && bytes[21] <= 1 && bytes[22] <= 1 &&
            std::all_of(settings.keys.begin(), settings.keys.end(), valid_key);
 }
 
@@ -179,7 +184,9 @@ void log_settings(const char *action, const Settings &settings, uint32_t generat
     for (const auto key : settings.keys) {
         std::printf("%02x", key);
     }
-    std::printf(" upload_scores=%u\n", unsigned(settings.upload_scores));
+    std::printf(" upload_scores=%u resolution=%s half_refresh=%u horizontal_aa=%u\n",
+                unsigned(settings.upload_scores), settings.video.low_resolution ? "320x240" : "640x480",
+                unsigned(settings.video.half_refresh), unsigned(settings.video.supersampled()));
 }
 
 template <typename Value>
@@ -408,8 +415,20 @@ bool setting_is_volume(S setting) {
     return setting == S::guitar || setting == S::song || setting == S::rhythm || setting == S::miss;
 }
 
+bool setting_adjustable(const Settings &settings, S setting) {
+    switch (setting) {
+        case S::antialiasing: return settings.video.low_resolution;
+        case S::binding:
+        case S::fullscreen:
+        case S::frequency:
+        case S::sample_bits:
+        case S::buffer: return false;
+        default: return true;
+    }
+}
+
 bool adjust_setting(Settings &settings, S setting, int direction, unsigned languages) {
-    if (!direction) {
+    if (!direction || !setting_adjustable(settings, setting)) {
         return false;
     }
     switch (setting) {
@@ -420,6 +439,9 @@ bool adjust_setting(Settings &settings, S setting, int direction, unsigned langu
         case S::chilly: settings.mods ^= 1; return true;
         case S::light_graphics: settings.mods ^= 2; return true;
         case S::delay: return nudge(settings.delay_ms, direction, 0, 300);
+        case S::resolution: return nudge(settings.video.low_resolution, direction, 0, 1);
+        case S::fps: return nudge(settings.video.half_refresh, direction, 0, 1);
+        case S::antialiasing: return nudge(settings.video.horizontal_aa, direction, 0, 1);
         case S::text_scale: return nudge(settings.text_scale, 10 * direction, 50, 250);
         case S::guitar: return nudge(settings.guitar_level, 10 * direction, 0, 100);
         case S::song: return nudge(settings.song_level, 10 * direction, 0, 100);
@@ -445,10 +467,14 @@ std::string setting_value(const Settings &settings, const SettingRow &row) {
         case S::lefty: return settings.lefty ? "Yes" : "No";
         case S::tapping: return settings.tapping ? "Yes" : "No";
         case S::upload: return settings.upload_scores ? "Yes" : "No";
-        case S::resolution: return "640x480";
+        case S::resolution: return settings.video.low_resolution ? "320x240" : "640x480";
         case S::fullscreen: return "Yes";
-        case S::fps: return "Video refresh";
-        case S::antialiasing: return "Off";
+        case S::fps: return settings.video.half_refresh ? "Half refresh" : "Video refresh";
+        case S::antialiasing:
+            if (!settings.video.low_resolution) {
+                return "320x240 only";
+            }
+            return settings.video.supersampled() ? "2x horizontal" : "Off";
         case S::text_scale: return std::to_string(settings.text_scale) + "%";
         case S::delay: return std::to_string(settings.delay_ms);
         case S::frequency: return "44100 Hz";

@@ -7,6 +7,8 @@
 
 namespace dc {
 
+inline constexpr char sd_songs_root[] = "/sd/songs";
+
 struct SongEntry {
     std::string title;
     std::string artist;
@@ -24,5 +26,6 @@ struct SongEntry {
 
 std::vector<SongEntry> song_library();
 std::vector<SongEntry> imported_song_sources();
+const char *load_sd_song_library(std::vector<SongEntry> &songs, std::vector<SongEntry> &imports);
 
 } // namespace dc

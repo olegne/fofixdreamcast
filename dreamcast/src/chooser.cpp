@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <map>
+#include <utility>
 
 namespace dc {
 namespace {
@@ -15,8 +16,15 @@ std::string parent_path(const std::string &path) {
 }
 
 std::string containing_library(const SongEntry &song) {
-    return song.midi.compare(0, sizeof(songs_root), "/cd/songs/") == 0
-        ? parent_path(parent_path(song.midi)) : songs_root;
+    if (song.midi.compare(0, sizeof(songs_root), "/cd/songs/") == 0 ||
+        song.midi.compare(0, sizeof(sd_songs_root), "/sd/songs/") == 0) {
+        return parent_path(parent_path(song.midi));
+    }
+    constexpr char sd_imports_prefix[] = "/sd/imports/";
+    if (song.midi.compare(0, sizeof(sd_imports_prefix) - 1, sd_imports_prefix) == 0) {
+        return sd_songs_root;
+    }
+    return songs_root;
 }
 
 std::string trim(const std::string &s) {
@@ -92,11 +100,15 @@ void SongChooser::refresh(const std::string &previous) {
 
     const std::string prefix = path_ + '/';
     std::map<std::string, int> folders;
+    int sd_song_count = -1;
     for (const auto &song : *songs_) {
         if (song.tutorial) {
             continue;
         }
         const auto path = containing_library(song);
+        if (path_ == songs_root && (path == sd_songs_root || path.compare(0, sizeof(sd_songs_root), "/sd/songs/") == 0)) {
+            sd_song_count = std::max(0, sd_song_count) + (path == sd_songs_root);
+        }
         if (path.compare(0, prefix.size(), prefix) != 0) {
             continue;
         }
@@ -105,6 +117,14 @@ void SongChooser::refresh(const std::string &previous) {
         count += slash == std::string::npos;
     }
 
+    if (sd_song_count >= 0) {
+        SongEntry directory;
+        directory.title = "SD Card";
+        directory.midi = sd_songs_root;
+        directory.library_count = sd_song_count;
+        items_.push_back(std::move(directory));
+        indices_.push_back(0);
+    }
     for (const auto &[path, count] : folders) {
         SongEntry directory;
         directory.library_count = count;
@@ -192,7 +212,7 @@ bool SongChooser::parent() {
         return false;
     }
     const auto previous = path_;
-    path_ = parent_path(path_);
+    path_ = path_ == sd_songs_root ? songs_root : parent_path(path_);
     refresh(previous);
     return true;
 }

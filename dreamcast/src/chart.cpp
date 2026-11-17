@@ -553,6 +553,11 @@ Pick Round::fret_edge(const Chart &chart, int time_ms, uint8_t held, const Rules
     return result;
 }
 
+void Round::release_input(int time_ms, const Rules &rules) {
+    pending_pick_ms_.reset();
+    end_sustain(time_ms, rules);
+}
+
 void Round::finish(const Chart &chart, int, const Rules &) {
     // GuitarScene goes straight to results before processing another frame.
     sustain_frets = 0;

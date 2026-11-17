@@ -221,12 +221,15 @@ bool View::load_mesh(const char *name, Shape &mesh) {
     return true;
 }
 
-bool View::init() {
-    vid_set_mode(DM_640x480, PM_RGB565);
+bool View::init(const VideoSettings &video) {
+    video_ = video;
+    render_y_scale_ = video.low_resolution ? 0.5f : 1.0f;
+    render_x_scale_ = video.supersampled() ? 1.0f : render_y_scale_;
+    vid_set_mode(video.low_resolution ? DM_320x240 : DM_640x480, PM_RGB565);
     const pvr_init_params_t params{
         {PVR_BINSIZE_32, PVR_BINSIZE_0, PVR_BINSIZE_32, PVR_BINSIZE_0, PVR_BINSIZE_0},
         // Draw translucent board layers in submission order so the neck cannot cover the tails.
-        768 * 1024, 0, 0, 1, 3, 1
+        768 * 1024, 0, video.supersampled(), 1, 3, 1
     };
     if (pvr_init(&params) < 0) {
         return false;
@@ -276,6 +279,26 @@ bool View::init() {
            prepare_frets();
 }
 
+bool View::configure_video(VideoSettings &video) {
+    if (video.low_resolution == video_.low_resolution && video.supersampled() == video_.supersampled()) {
+        return true;
+    }
+    auto previous = video_;
+    previous.half_refresh = video.half_refresh;
+    pvr_wait_ready();
+    pvr_wait_render_done();
+    pvr_shutdown();
+    *this = View{};
+    if (init(video)) {
+        return true;
+    }
+    std::puts("FoFDC: restoring the previous video mode");
+    pvr_shutdown();
+    *this = View{};
+    video = previous;
+    return init(video);
+}
+
 bool View::prepare_frets() {
     if (!load_mesh("/rd/theme/keys.mesh", fret_model_)) {
         return false;
@@ -319,11 +342,11 @@ void View::draw_frets(bool strumming, float visibility, bool transparent) {
         const float weight = fret_weights_[lane];
         if (settled && !lefty_ && (weight == 0.0f || weight == 0.5f)) {
             const auto &vertices = fret_vertices_[lane][weight == 0.0f ? 0 : (strumming ? 2 : 1)];
-            pvr_prim(vertices.data(), vertices.size() * sizeof(pvr_vertex_t));
+            submit(vertices.data(), vertices.size());
         } else {
             const float depressed = weight + (strumming && weight > 0.0f ? 0.25f : 0.0f);
             fret_vertices(lane, depressed, releasing_fret_, visibility);
-            pvr_prim(releasing_fret_.data(), releasing_fret_.size() * sizeof(pvr_vertex_t));
+            submit(releasing_fret_.data(), releasing_fret_.size());
         }
     }
 }
@@ -431,6 +454,44 @@ void View::material(const pvr_poly_hdr_t &header) {
     }
 }
 
+void View::scale_vertex(pvr_vertex_t &vertex) const {
+    if (video_.low_resolution) {
+        vertex.x *= render_x_scale_;
+        vertex.y *= render_y_scale_;
+    }
+}
+
+void View::submit(const pvr_vertex_t *vertices, size_t count) {
+    if (!video_.low_resolution) {
+        pvr_prim(vertices, count * sizeof(*vertices));
+        return;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        auto vertex = vertices[i];
+        scale_vertex(vertex);
+        auto *target = pvr_dr_target(direct_);
+        *target = vertex;
+        pvr_dr_commit(target);
+    }
+}
+
+bool View::render_slot(bool half_refresh) {
+    if (!half_refresh) {
+        render_capped_ = false;
+        return true;
+    }
+    const auto vblank = static_cast<unsigned>(pvr_get_vbl_count());
+    if (render_capped_ && vblank - render_vblank_ < 2) {
+        do {
+            thd_sleep(1);
+        } while (static_cast<unsigned>(pvr_get_vbl_count()) == vblank);
+        return false;
+    }
+    render_vblank_ = vblank;
+    render_capped_ = true;
+    return true;
+}
+
 void View::sprite(TextureId id, float x, float y, float w, float h, float z,
                   float u0, float v0, float u1, float v1, uint32_t color) {
     const auto &texture = textures_[id];
@@ -441,7 +502,7 @@ void View::sprite(TextureId id, float x, float y, float w, float h, float z,
         {PVR_CMD_VERTEX, x,     y + h, z, u0, v1, color, 0},
         {PVR_CMD_VERTEX_EOL, x + w, y + h, z, u1, v1, color, 0}
     };
-    pvr_prim(vertices, sizeof(vertices));
+    submit(vertices, std::size(vertices));
 }
 
 void View::rotated_sprite(TextureId id, float x, float y, float w, float h, float angle,
@@ -459,7 +520,7 @@ void View::rotated_sprite(TextureId id, float x, float y, float w, float h, floa
                    x + dx * rotation.cos - dy * rotation.sin, y + dx * rotation.sin + dy * rotation.cos,
                    depth, u, v, color, 0};
     }
-    pvr_prim(quad, sizeof(quad));
+    submit(quad, std::size(quad));
 }
 
 
@@ -473,40 +534,68 @@ void View::board_quad(TextureId id, float x0, float x1, float y, float z0, float
         board_vertex(x0, y, z0, u0, v1, front, false),
         board_vertex(x1, y, z0, u1, v1, front, true)
     };
-    pvr_prim(vertices, sizeof(vertices));
+    submit(vertices, std::size(vertices));
 }
 
-void View::draw_board_bar(float y, float z, float opacity, uint32_t color) {
-    constexpr float half_length = 0.04f;
-    const auto top = board_vertex(left_edge, y, z + half_length, 0, 0.5f, color, false);
-    const auto bottom = board_vertex(left_edge, y, z - half_length, 0, 0.5f, color, false);
-    const float height = bottom.y - top.y;
-    if (opacity <= 0.0f || height <= 0.0f) {
+void View::draw_board_bar(float y, float z, float angle, float opacity, uint32_t color) {
+    if (opacity <= 0.0f) {
         return;
+    }
+    constexpr float half_length = 0.04f;
+    const auto transform = shz_sincosf(angle);
+    const auto corner = [&](unsigned side, float position) {
+        const float x = side ? right_edge : left_edge;
+        return board_vertex(x * transform.cos - y * transform.sin, x * transform.sin + y * transform.cos,
+                            position, float(side), 0.5f, color, false);
+    };
+    const pvr_vertex_t near_edge[] = {corner(0, z - half_length), corner(1, z - half_length)};
+    const pvr_vertex_t far_edge[] = {corner(0, z + half_length), corner(1, z + half_length)};
+    float normal_x = 0.0f;
+    float normal_y = 1.0f;
+    if (angle != 0.0f) {
+        const float dx = near_edge[1].x - near_edge[0].x + far_edge[1].x - far_edge[0].x;
+        const float dy = near_edge[1].y - near_edge[0].y + far_edge[1].y - far_edge[0].y;
+        const float length = std::sqrt(dx * dx + dy * dy);
+        if (length <= 0.0f) {
+            return;
+        }
+        normal_x = -dy / length;
+        normal_y = dx / length;
     }
 
     // Sample the classic texture across the neck. Vertically, a bar this
     // thin needs pixel coverage: point samples can fall entirely in its
     // transparent margins. Integrate a stripe with the texture's alpha area.
-    const float thickness = height * bar_coverage_;
-    const float center = (top.y + bottom.y) * 0.5f;
-    const float outer = (thickness + 1.0f) * 0.5f;
-    const float inner = std::fabs(thickness - 1.0f) * 0.5f;
-    const float rows[] = {center - outer, center - inner, center + inner, center + outer};
-    const auto solid = tint(color, opacity * std::min(1.0f, thickness));
     const auto clear = color & 0x00ffffff;
     pvr_vertex_t vertices[8];
-    for (unsigned row = 0; row < 4; ++row) {
-        const float ratio = (rows[row] - top.y) / height;
-        const float x = top.x + ratio * (bottom.x - top.x);
-        const float depth = top.z + ratio * (bottom.z - top.z);
-        const auto base = row == 0 || row == 3 ? clear : solid;
-        vertices[2 * row] = {PVR_CMD_VERTEX, x, rows[row], depth, 0, 0.5f, base, 0};
-        vertices[2 * row + 1] = {PVR_CMD_VERTEX, 640.0f - x, rows[row], depth, 1, 0.5f, base, 0};
+    for (unsigned side = 0; side < 2; ++side) {
+        const auto &top = far_edge[side];
+        const auto &bottom = near_edge[side];
+        const float dx = bottom.x - top.x;
+        const float dy = bottom.y - top.y;
+        const float footprint = std::abs(dx * normal_x + dy * normal_y) * render_y_scale_;
+        if (footprint < 0.001f) {
+            return;
+        }
+        // Match the phase-averaged energy from the original renderer's
+        // trilinear bar texture and 4× MSAA at 640×480. The coverage stays
+        // continuous where the reference also varies with sample positions.
+        const float filtered = footprint / (footprint + 0.73f);
+        const float thickness = footprint * bar_coverage_;
+        const float outer = (thickness + 1.0f) * 0.5f / footprint;
+        const float inner = std::abs(thickness - 1.0f) * 0.5f / footprint;
+        const float ratios[] = {0.5f - outer, 0.5f - inner, 0.5f + inner, 0.5f + outer};
+        const auto solid = tint(color, opacity * filtered * std::min(1.0f, thickness));
+        for (unsigned row = 0; row < 4; ++row) {
+            const float ratio = ratios[row];
+            vertices[2 * row + side] = {PVR_CMD_VERTEX, top.x + ratio * dx, top.y + ratio * dy,
+                                        top.z + ratio * (bottom.z - top.z), float(side), 0.5f,
+                                        row == 0 || row == 3 ? clear : solid, 0};
+        }
     }
     vertices[7].flags = PVR_CMD_VERTEX_EOL;
     material(textures_[bars].header);
-    pvr_prim(vertices, sizeof(vertices));
+    submit(vertices, std::size(vertices));
 }
 
 pvr_vertex_t View::board_vertex(float x, float y, float z, float u, float v, uint32_t color,
@@ -682,7 +771,7 @@ void View::text_line(float x, float y, const char *line, float size, uint32_t co
                     vertex(left, top + height, u0, v1, PVR_CMD_VERTEX),
                     vertex(left + width, top + height, u1, v1, PVR_CMD_VERTEX_EOL)
                 };
-                pvr_prim(quad, sizeof(quad));
+                submit(quad, std::size(quad));
             }
         }
         x += size * glyph.advance;
@@ -739,6 +828,7 @@ void View::note_mesh(NoteMesh &mesh, unsigned lane, float z, float opacity, bool
     for (size_t i = 0; i < mesh.points.size(); ++i) {
         const auto &point = mesh.points[i];
         mesh.projected[i] = board_vertex(x + point[0], y + height * point[1], z + point[2], 0, 0, 0, false);
+        scale_vertex(mesh.projected[i]);
     }
     // Reuse the projected position across faces and preserve per-corner color and strip boundaries.
     for (const auto &corner : mesh.corners) {
@@ -842,7 +932,7 @@ void View::draw_tail_wave(unsigned lane, const Chord &note, int position_ms, flo
         auto next = slice(time, width);
         pvr_vertex_t strip[] = {previous[0], next[0], previous[1], next[1], previous[2], next[2]};
         strip[5].flags = PVR_CMD_VERTEX_EOL;
-        pvr_prim(strip, sizeof(strip));
+        submit(strip, std::size(strip));
         previous = next;
         step = first_step + step_gradient * (remaining - time);
     }
@@ -862,15 +952,19 @@ void View::world(const Frame &f, const Round &round, const Chart &chart,
     surface(-1.0f, 8.4f, neck_color, neck_color);
     surface(8.4f, board_length, 0x00ffffff, neck_color);
     draw_tracks(visibility);
-    for (int beat = static_cast<int>(timing.grid_beat); beat < timing.grid_beat + 5.0f; ++beat) {
+    const float hidden = 1.0f - visibility;
+    const float rotation = hidden * matrix_pi * 0.5f;
+    float angle = rotation;
+    for (int beat = static_cast<int>(timing.grid_beat); beat < timing.grid_beat + 5.0f;
+         ++beat, angle += rotation) {
         const float z = (beat - timing.grid_beat) * board_length / 5.0f;
         if (z < -1.0f) {
             continue;
         }
         const auto alpha = 0.75f * std::min({1.0f, 1.0f + z, (board_length - z) / 2.4f});
-        draw_board_bar(0.005f - (1.0f - visibility), z, visibility * alpha, yellow);
+        draw_board_bar(0.005f - hidden, z, angle, visibility * alpha, yellow);
     }
-    draw_board_bar(0.006f, 0.0f, visibility * 0.5f, gold);
+    draw_board_bar(0.006f, 0.0f, 0.0f, visibility * 0.5f, gold);
 
     const auto past = std::lower_bound(chart.begin(), chart.end(), f.time_ms - int(period_ms * 2),
                                        [](const Chord &c, int time) { return c.time_ms < time; });
@@ -891,11 +985,13 @@ void View::world(const Frame &f, const Round &round, const Chart &chart,
             const auto fade = z < 0 ? std::clamp(1.0f + end, 0.0f, 1.0f)
                                     : std::min(1.0f, (board_length - z) / 2.4f);
             if (end > -1.0f && end > z) {
-                const auto tail_color = tint(z < 0 && !taken ? 0xff999999 : color,
-                                             fade * (z < 0 && !taken ? 0.5f : 1.0f));
+                const bool missed = z < 0 && !taken;
+                const auto tail_color = tint(missed ? 0xff999999 : color,
+                                             visibility * fade * (missed ? 0.5f : 1.0f));
                 const auto begin = std::max(taken ? 0.0f : -1.0f, z);
                 if (end > begin) {
-                    board_quad(tail, x + .1f, x - .1f, .008f, begin, std::min(board_length, end),
+                    board_quad(tail, x + .1f, x - .1f, note_lift(hidden, lane) + .008f,
+                               begin, std::min(board_length, end),
                                0, 0, 1, 1, tail_color, tail_color);
                 }
             }
@@ -944,7 +1040,7 @@ void View::draw_fret_glows(const Frame &frame, const Chord *held) {
                 strip[i] = board_vertex(x + dx * rotation.cos + dz * rotation.sin, y,
                                    -dx * rotation.sin + dz * rotation.cos, u, 1.0f - v, color, i == 3);
             }
-            pvr_prim(strip, sizeof(strip));
+            submit(strip, std::size(strip));
             y += strength * 0.2f;
             radius *= 0.8f;
             angle += strength * 20.0f * radians;
@@ -1091,7 +1187,7 @@ void View::multiplier_effect(const Frame &frame, const Round &round, float song_
             {PVR_CMD_VERTEX, 0, 480, depth, 0, 0, bottom, 0},
             {PVR_CMD_VERTEX_EOL, 640, 480, depth, 0, 0, bottom, 0}
         };
-        pvr_prim(flash, sizeof(flash));
+        submit(flash, std::size(flash));
     }
     if (show_icon) {
         const float scale = 0.5f + 0.5f * ratio * ratio * ratio;
@@ -1521,13 +1617,14 @@ void View::draw_cassettes(const Frame &frame, const std::vector<SongEntry> &libr
                     const auto &v = face.vertices[k];
                     strip[k] = project(v.point, v.u, v.v, white, k + 1 == face.count);
                 }
-                pvr_prim(strip, face.count * sizeof(pvr_vertex_t));
+                submit(strip, face.count);
             }
         } else {
             material(mesh_header_);
             const auto draw_shape = [&](CassetteMesh &shape, uint32_t color) {
                 for (size_t p = 0; p < shape.points.size(); ++p) {
                     shape.projected[p] = project(shape.points[p], 0, 0, color, false);
+                    scale_vertex(shape.projected[p]);
                 }
                 unsigned corner = 0;
                 for (const auto point : shape.corners) {
@@ -1630,7 +1727,7 @@ void View::setlist(const Frame &frame, const std::vector<SongEntry> &library) {
 
 void View::draw_editor(const Frame &frame) {
     constexpr const char *options[] = {
-        "Edit Existing Song", "Import New Song", "Import Guitar Hero(tm) Songs"
+        "Edit Existing Song", "Import New Song", "Import Guitar Hero(tm) Songs", "Load SD Card"
     };
     constexpr const char *actions[] = {
         "Save Song", "Set Song Name", "Set Artist Name", "Set Beats per Minute",
@@ -1651,6 +1748,9 @@ void View::draw_editor(const Frame &frame) {
     if (frame.screen == Screen::editor_menu) {
         rotated_sprite(logo, 320, 103, 512, 124, 0, menu_depth);
         items(options, std::size(options), menu_y, menu_line, main_font);
+        if (!frame.editor_text.empty()) {
+            fit_text(64, menu_y + 4 * menu_line, frame.editor_text.c_str(), 512, 0.8f * main_font, yellow);
+        }
         return;
     }
     if (frame.screen == Screen::editor_import) {
@@ -1659,7 +1759,7 @@ void View::draw_editor(const Frame &frame) {
             fit_text(32, 90, frame.editor_text.c_str(), 576, 0.8f * main_font, yellow);
         }
         if (frame.import_sources->empty()) {
-            text(32, 144, "No staged songs were found on this disc.", 0.8f * main_font, yellow);
+            text(32, 144, "No staged songs were found on disc or SD card.", 0.8f * main_font, yellow);
         } else {
             const size_t first = frame.selected >= 8 ? frame.selected - 7 : 0;
             const size_t last = std::min(frame.import_sources->size(), first + 8);
@@ -1699,7 +1799,7 @@ void View::draw_editor(const Frame &frame) {
             project(x0, 0, z1, bias, 0, v1, far_color, false),
             project(x1, 0, z1, bias, 1, v1, far_color, true)
         };
-        pvr_prim(vertices, sizeof(vertices));
+        submit(vertices, std::size(vertices));
     };
     const auto surface = [&](float start, float end, uint32_t a, uint32_t b) {
         const float offset = std::fmod(-0.5f * position / period * board_length / 5.0f, 1.0f);
@@ -1737,6 +1837,7 @@ void View::draw_editor(const Frame &frame) {
             const auto &point = mesh.points[i];
             const float height = z < 0 ? point[1] * 0.1f : point[1];
             mesh.projected[i] = project(x + point[0], height, z + point[2], 0.006f, 0, 0, white, false);
+            scale_vertex(mesh.projected[i]);
         }
         for (const auto &corner : mesh.corners) {
             auto vertex = mesh.projected[corner.point];
@@ -1783,9 +1884,11 @@ void View::draw_editor(const Frame &frame) {
             for (unsigned i = 0; i < face.count; ++i) {
                 const auto &point = face.vertices[i];
                 const auto color = shade(fret_colors[lane], 0.8f * point.shade, (0.1f + weight) * point.shade);
+                auto vertex = project(lane_x(lane) + point.x, point.y + weight / 6, point.z, 0.006f,
+                                      0, 0, color, i + 1 == face.count);
+                scale_vertex(vertex);
                 auto *target = pvr_dr_target(direct_);
-                *target = project(lane_x(lane) + point.x, point.y + weight / 6, point.z, 0.006f,
-                                  0, 0, color, i + 1 == face.count);
+                *target = vertex;
                 pvr_dr_commit(target);
             }
         }
@@ -1810,7 +1913,7 @@ void View::draw_editor(const Frame &frame) {
         {PVR_CMD_VERTEX, 0, 480, menu_depth + 1.5f, 0, 0, veil, 0},
         {PVR_CMD_VERTEX_EOL, 640, 480, menu_depth + 1.5f, 0, 0, veil, 0}
     };
-    pvr_prim(dim, sizeof(dim));
+    submit(dim, std::size(dim));
     if (frame.screen == Screen::editor_actions) {
         items(actions, std::size(actions), 50, 37, 0.90f * main_font);
     } else if (frame.screen == Screen::editor_value && frame.selected < std::size(prompts)) {
@@ -1876,7 +1979,7 @@ void View::menu(const Frame &frame, const Round &round,
             {PVR_CMD_VERTEX, 0, 480, depth, 0, 0, bottom, 0},
             {PVR_CMD_VERTEX_EOL, 640, 480, depth, 0, 0, bottom, 0}
         };
-        pvr_prim(vertices, sizeof(vertices));
+        submit(vertices, std::size(vertices));
     };
     char line[128];
     if (frame.countdown > 0.0f && (frame.screen == Screen::countdown || frame.screen == Screen::pause)) {
@@ -1935,7 +2038,7 @@ void View::menu(const Frame &frame, const Round &round,
                 row_slide *= 2.0f;
             }
             if (frame.input == InputDevice::none) {
-                text(128, 168, "Connect a keyboard", .7f * row_font, yellow);
+                text(128, 168, "Connect a keyboard or controller", .7f * row_font, yellow);
             }
             break;
         }
@@ -1984,11 +2087,7 @@ void View::menu(const Frame &frame, const Round &round,
                 if (submenu) {
                     label += " >";
                 } else if (!value.empty()) {
-                    const bool adjust = current && row.setting != Setting::binding &&
-                                        row.setting != Setting::resolution &&
-                                        row.setting != Setting::fullscreen && row.setting != Setting::fps &&
-                                        row.setting != Setting::antialiasing && row.setting != Setting::frequency &&
-                                        row.setting != Setting::sample_bits && row.setting != Setting::buffer;
+                    const bool adjust = current && setting_adjustable(settings->draft, row.setting);
                     label += ": ";
                     if (adjust) {
                         label += "< ";
@@ -2101,12 +2200,11 @@ void View::menu(const Frame &frame, const Round &round,
                                                       std::to_string(frame.upload_ordinal));
                 }
                 if (!upload_notice.empty()) {
-                    if (!footer.empty()) {
-                        footer += " | ";
-                    }
-                    footer += upload_notice;
+                    fit_text(32, (0.7f + slide) * 640, upload_notice.c_str(), 576,
+                             0.5f * main_font, color);
                 }
-                fit_text(32, 452, footer.c_str(), 576, 0.55f * row_font, color);
+                fit_text(32, upload_notice.empty() ? 452.0f : 468.0f, footer.c_str(), 576,
+                         0.45f * row_font, color);
                 break;
             }
             text(320, (0.05f - slide) * 640, tr("Song Finished!"), main_font, color, true);
@@ -2139,8 +2237,18 @@ void View::menu(const Frame &frame, const Round &round,
                 text(320, y, accuracy_text.c_str(), main_font, color, true);
                 text(320, y + spacing, streak.c_str(), main_font, color, true);
             }
-            if (frame.results_name) {
-                const float hidden_name = 1.0f - frame.name_visibility;
+            if (frame.results_warning) {
+                const float hidden_warning = 1.0f - frame.results_dialog_visibility;
+                const float warning_slide = hidden_warning * hidden_warning;
+                const float alpha = 1.0f - warning_slide;
+                dim(alpha);
+                const auto end = wrapped_text(64, (0.3f + 2.0f * warning_slide) * 640,
+                                              tr("No highscores for cheaters!"), main_font,
+                                              tint(yellow, alpha), warning_slide, 576);
+                text(320, end + 1.5f * spacing + 1280 * warning_slide, tr("<OK>"),
+                     0.5f * main_font, tint(gold, alpha), true, 1.0f);
+            } else if (frame.results_name) {
+                const float hidden_name = 1.0f - frame.results_dialog_visibility;
                 const float name_slide = hidden_name * hidden_name;
                 const auto prompt_color = tint(yellow, 1.0f - name_slide);
                 const auto text_color = tint(gold, 1.0f - name_slide);
@@ -2151,7 +2259,7 @@ void View::menu(const Frame &frame, const Round &round,
                 const float prompt_end = wrapped_text(64, y, prompt, main_font, prompt_color, 0, 576);
                 const float name_y = prompt_end + (0.08f + 1.25f * name_slide) * 640;
                 const bool controller = frame.input == InputDevice::controller;
-                const char *cursor = frame.name_cursor && frame.name_visibility > 0.9f ? "|" : "";
+                const char *cursor = frame.name_cursor && frame.results_dialog_visibility > 0.9f ? "|" : "";
                 if (controller) {
                     std::snprintf(line, sizeof(line), "%s <%c>", frame.score_name.c_str(), frame.name_wheel);
                 } else {
@@ -2173,7 +2281,7 @@ void View::menu(const Frame &frame, const Round &round,
         case Screen::error:
             center(121, "Load Error");
             text(320, 204, frame.error, 0.72f * main_font, yellow, true);
-            center(321, "Esc Back");
+            center(321, frame.input == InputDevice::controller ? "B Back" : "Esc Back");
             break;
         case Screen::editor_menu:
         case Screen::editor_import:
@@ -2201,6 +2309,7 @@ void View::draw(const Frame &frame, const SongChart &song, const Round &round,
                          (frame.screen == Screen::settings && frame.settings_menu &&
                           frame.settings_menu->page == SettingsPage::pause_volume);
     const bool stage_active = stage_transition_.advance(playing, menu_frame_ms_);
+    const bool finishing_stage = frame.screen == Screen::results && stage_active;
     const float stage_visibility = stage_transition_.visibility();
     const bool opaque_stage = playing && stage_visibility == 1.0f;
     const auto &chart = song.guitar[frame.difficulty];
@@ -2216,6 +2325,9 @@ void View::draw(const Frame &frame, const SongChart &song, const Round &round,
         visual_timing = guitar_clock_.render(frame.time_ms, song.tempos,
                                              frame.countdown > 0.0f, frame.sustain_expired);
         update_frets(frame, round);
+    }
+    if (!render_slot(frame.half_refresh)) {
+        return;
     }
     pvr_wait_ready();
     prepare_cassette_labels(frame, library);
@@ -2275,13 +2387,15 @@ void View::draw(const Frame &frame, const SongChart &song, const Round &round,
     }
     if (playing) {
         multiplier_effect(frame, round, song.initial_us_per_beat * 0.001f);
-    } else if (frame.screen != Screen::credits) {
+    } else if (frame.screen != Screen::credits && !finishing_stage) {
         menu_backdrop(frame);
         if (frame.screen == Screen::setlist) {
             draw_cassettes(frame, library, true);
         }
     }
-    menu(frame, round, library);
+    if (!finishing_stage) {
+        menu(frame, round, library);
+    }
     pvr_list_finish();
     pvr_scene_finish();
 }

@@ -43,7 +43,8 @@ struct Frame {
     unsigned results_age_ms = 0;
     bool results_actions = false;
     bool results_name = false;
-    float name_visibility = 0.0f;
+    bool results_warning = false;
+    float results_dialog_visibility = 0.0f;
     bool name_cursor = false;
     char name_wheel = 'A';
     std::string score_name;
@@ -54,6 +55,7 @@ struct Frame {
     const ScoreBook *scores = nullptr;
     const SettingsMenu *settings_menu = nullptr;
     uint16_t text_scale = 100;
+    bool half_refresh = false;
     bool lefty = false;
     bool tapping = true;
     unsigned selected = 0;
@@ -82,7 +84,9 @@ struct Frame {
 
 class View {
 public:
-    bool init();
+    bool stage_visible() const { return stage_transition_.visibility() > 0.0f; }
+    bool init(const VideoSettings &video = {});
+    bool configure_video(VideoSettings &video);
     void reset_effects(bool same_scene = false);
     void record_pick(const Round &round, bool after_stage_update = false);
     void draw(const Frame &frame, const SongChart &song, const Round &round,
@@ -184,6 +188,9 @@ private:
     void update_frets(const Frame &frame, const Round &round);
     void draw_fret_glows(const Frame &frame, const Chord *held);
     void material(const pvr_poly_hdr_t &header);
+    void submit(const pvr_vertex_t *vertices, size_t count);
+    void scale_vertex(pvr_vertex_t &vertex) const;
+    bool render_slot(bool half_refresh);
     void sprite(TextureId id, float left, float top, float width, float height, float depth,
                 float u0 = 0, float v0 = 0, float u1 = 1, float v1 = 1,
                 uint32_t color = 0xffffffff);
@@ -192,7 +199,7 @@ private:
     void board_quad(TextureId id, float x0, float x1, float y, float z0, float z1,
                     float u0, float v0, float u1, float v1,
                     uint32_t back = 0xffffffff, uint32_t front = 0xffffffff);
-    void draw_board_bar(float y, float z, float opacity, uint32_t color);
+    void draw_board_bar(float y, float z, float angle, float opacity, uint32_t color);
     pvr_vertex_t board_vertex(float x, float y, float z, float u, float v, uint32_t color,
                               bool last, float bias = 0.0f) const;
     void select_language(unsigned index);
@@ -239,6 +246,11 @@ private:
               const std::vector<SongEntry> &library);
 
     std::array<Texture, texture_count> textures_{};
+    VideoSettings video_;
+    float render_x_scale_ = 1.0f;
+    float render_y_scale_ = 1.0f;
+    unsigned render_vblank_ = 0;
+    bool render_capped_ = false;
     CassetteMesh cassette_shell_, cassette_reels_, library_shell_, library_details_;
     std::vector<LabelFace> cassette_sticker_, library_sticker_;
     std::array<CachedLabel, 3> custom_labels_{};

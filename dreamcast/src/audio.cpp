@@ -205,50 +205,124 @@ bool Audio::play_prepared() {
     return true;
 }
 
+size_t Audio::read_file(Stem &stem, void *dst, size_t size, size_t count) {
+    if (!stem.read_buffer) {
+        return std::fread(dst, size, count, stem.file);
+    }
+    if (!size || count > std::numeric_limits<size_t>::max() / size || stem.file_position >= stem.file_size) {
+        return 0;
+    }
+    auto *output = static_cast<char *>(dst);
+    const size_t wanted = std::min(size * count, stem.file_size - stem.file_position);
+    size_t copied = 0;
+    while (copied < wanted) {
+        const auto page = stem.file_position & ~(size_t(cd_read_buffer_size) - 1);
+        if (!stem.read_buffer_count || page != stem.read_buffer_start) {
+            // Even after arbitrary Vorbis seeks, fill on an ISO sector
+            // boundary so KOS issues one multiblock DMA for this cache page.
+            stem.read_buffer_count = 0;
+            if (fs_seek(stem.cd_file, page, SEEK_SET) != static_cast<off_t>(page)) {
+                break;
+            }
+            const auto got = fs_read(stem.cd_file, stem.read_buffer, cd_read_buffer_size);
+            if (got <= 0) {
+                break;
+            }
+            stem.read_buffer_start = page;
+            stem.read_buffer_count = static_cast<size_t>(got);
+        }
+        const auto offset = stem.file_position - page;
+        if (offset >= stem.read_buffer_count) {
+            break;
+        }
+        const auto chunk = std::min(wanted - copied, stem.read_buffer_count - offset);
+        std::memcpy(output + copied, stem.read_buffer + offset, chunk);
+        stem.file_position += chunk;
+        copied += chunk;
+    }
+    return copied / size;
+}
+
+int Audio::seek_file(Stem &stem, ogg_int64_t offset, int whence) {
+    constexpr long max_position = std::numeric_limits<long>::max();
+    if (!stem.read_buffer) {
+        return offset < std::numeric_limits<long>::min() || offset > max_position
+            ? -1 : std::fseek(stem.file, static_cast<long>(offset), whence);
+    }
+    if (whence != SEEK_SET && whence != SEEK_CUR && whence != SEEK_END) {
+        return -1;
+    }
+    const ogg_int64_t base = whence == SEEK_SET ? 0 : whence == SEEK_CUR ? stem.file_position : stem.file_size;
+    if (offset < -base || offset > max_position - base) {
+        return -1;
+    }
+    stem.file_position = static_cast<size_t>(base + offset);
+    return 0;
+}
+
+int Audio::close_file(Stem &stem) {
+    if (stem.cd_file != FILEHND_INVALID) {
+        const auto file = stem.cd_file;
+        stem.cd_file = FILEHND_INVALID;
+        return fs_close(file);
+    }
+    auto *file = stem.file;
+    stem.file = nullptr;
+    return file ? std::fclose(file) : 0;
+}
+
 bool Audio::open(Stem &stem, const char *path, PrepareService service) {
     if (service) {
         service();
     }
-    auto *file = std::fopen(path, "rb");
-    if (!file) {
-        error_ = "Could not open an audio track.";
-        return false;
-    }
     if (std::strncmp(path, "/cd/", 4) == 0) {
-        // KOS can DMA whole ISO9660 sectors into a 32-byte-aligned buffer.
-        auto *buffer = static_cast<char *>(memalign(32, cd_read_buffer_size));
-        if (buffer && std::setvbuf(file, buffer, _IOFBF, cd_read_buffer_size) == 0) {
-            stem.read_buffer = buffer;
-        } else {
-            std::free(buffer);
+        stem.cd_file = fs_open(path, O_RDONLY);
+        if (stem.cd_file != FILEHND_INVALID) {
+            const auto length = fs_total(stem.cd_file);
+            if (length <= size_t(std::numeric_limits<long>::max())) {
+                stem.file_size = length;
+                stem.read_buffer = static_cast<char *>(memalign(32, cd_read_buffer_size));
+            }
+            if (!stem.read_buffer) {
+                close_file(stem);
+            }
         }
     }
-    stem.file = file;
+    if (!stem.read_buffer) {
+        stem.file = std::fopen(path, "rb");
+        if (!stem.file) {
+            error_ = "Could not open an audio track.";
+            return false;
+        }
+    }
     stem.service = service;
     // A result voice can still be playing when Replay loads two stems. Let
     // it refill its own AICA ring between the file operations during prefill.
     constexpr ov_callbacks serviced_file{
         [](void *dst, size_t size, size_t count, void *user) {
-            const auto &input = *static_cast<Stem *>(user);
+            auto &input = *static_cast<Stem *>(user);
             if (input.service) {
                 input.service();
             }
-            return std::fread(dst, size, count, input.file);
+            return read_file(input, dst, size, count);
         },
         [](void *user, ogg_int64_t offset, int whence) {
-            const auto &input = *static_cast<Stem *>(user);
+            auto &input = *static_cast<Stem *>(user);
             if (input.service) {
                 input.service();
             }
-            return std::fseek(input.file, offset, whence);
+            return seek_file(input, offset, whence);
         },
-        [](void *user) { return std::fclose(static_cast<Stem *>(user)->file); },
-        [](void *user) { return std::ftell(static_cast<Stem *>(user)->file); }
+        [](void *user) { return close_file(*static_cast<Stem *>(user)); },
+        [](void *user) {
+            const auto &input = *static_cast<Stem *>(user);
+            return input.read_buffer ? static_cast<long>(input.file_position) : std::ftell(input.file);
+        }
     };
-    const int opened = service ? ov_open_callbacks(&stem, &stem.decoder, nullptr, 0, serviced_file) :
-                                 ov_open(file, &stem.decoder, nullptr, 0);
+    const int opened = service || stem.read_buffer ? ov_open_callbacks(&stem, &stem.decoder, nullptr, 0, serviced_file) :
+                                                     ov_open(stem.file, &stem.decoder, nullptr, 0);
     if (opened != 0) {
-        std::fclose(file);
+        close_file(stem);
         error_ = "Invalid Ogg Vorbis audio track.";
         return false;
     }
@@ -868,6 +942,7 @@ void Audio::close_stem(Stem &stem) {
     stem.clip = nullptr;
     std::free(stem.read_buffer);
     stem.read_buffer = nullptr;
+    stem.file_size = stem.file_position = stem.read_buffer_start = stem.read_buffer_count = 0;
     stem.resampler.reset();
     stem.channels = stem.frames = stem.decoded = 0;
 }

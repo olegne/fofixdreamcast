@@ -58,7 +58,7 @@ def texture(image, path, solid=False, dither_opaque=False, dither_alpha=False):
         words = array.array("H", (((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
                                   for r, g, b in zip(pixels, pixels, pixels)))
     elif dither_opaque or dither_alpha:
-        # Retain smooth gradients on the keys and in the translucent stage art
+        # Retain smooth gradients on the keys, stars and in the translucent stage art
         # without allocating more texture memory for ARGB4444.
         bayer = ((0, 8, 2, 10), (12, 4, 14, 6), (3, 11, 1, 9), (15, 7, 13, 5))
         pixels = iter(image.convert("RGBA").tobytes())
@@ -322,8 +322,9 @@ def main(data, out):
         if name in ("stage-beam", "glow"):
             additive_light_texture(scaled, destination)
         else:
-            texture(scaled, destination, dither_opaque=name in ("tutorial-keyboard", "tutorial-escape"),
-                    dither_alpha=name.startswith("stage-"))
+            stars = name in ("star", "star-off")
+            texture(scaled, destination, dither_opaque=stars or name in ("tutorial-keyboard", "tutorial-escape"),
+                    dither_alpha=stars or name.startswith("stage-"))
 
     # The center 640x480 of stage.ini's 1.3x backdrop fills the viewport.
     with Image.open(data / "stage_background.png") as src:
