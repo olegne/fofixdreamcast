@@ -22,6 +22,6 @@ struct CreditsFrame {
 constexpr unsigned credits_duration_ms = 35500;
 constexpr unsigned credits_transition_ms = 512;
 
-const std::array<CreditLine, 80> &credits_lines();
+const std::array<CreditLine, 81> &credits_lines();
 
 } // namespace dc

@@ -4,17 +4,19 @@
 namespace dc {
 namespace {
 
-// Order, text, colors and layout from Frets on Fire 1.3.110 Credits.py.
+// The Dreamcast attribution uses the original 1.5-line gap after the version.
+// Other entries retain the order, colors and layout from 1.3.110 Credits.py.
 constexpr CreditLine gap{" ", CreditAlign::center, 1.5f, false};
 constexpr CreditLine logo{nullptr, CreditAlign::center, 1.0f, false};
-constexpr std::array<CreditLine, 80> lines{{
+constexpr std::array<CreditLine, 81> lines{{
     {"Unreal Voodoo", CreditAlign::center, 1.0f, true},
     {"presents", CreditAlign::center, 1.0f, false},
     {" ", CreditAlign::center, 0.5f, true},
     logo,
     {" ", CreditAlign::center, 0.5f, true},
     {"Version 1.3.110", CreditAlign::center, 0.5f, true},
-    gap,
+    {"Dreamcast port by", CreditAlign::center, 0.5f, false},
+    {"angelo128bits", CreditAlign::center, 1.0f, true},
     {"Game Design,", CreditAlign::left, 1.0f, false},
     {"Programming:", CreditAlign::left, 1.0f, false},
     {"Sami Kyostila", CreditAlign::right, 1.0f, true},
@@ -92,7 +94,7 @@ constexpr std::array<CreditLine, 80> lines{{
 
 } // namespace
 
-const std::array<CreditLine, 80> &credits_lines() {
+const std::array<CreditLine, 81> &credits_lines() {
     return lines;
 }
 

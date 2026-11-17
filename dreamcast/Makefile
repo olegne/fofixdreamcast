@@ -4,6 +4,7 @@ SOURCES += src/credits.cpp src/records.cpp src/settings.cpp
 SOURCES += src/language.cpp src/chooser.cpp
 SOURCES += src/editor.cpp src/editor_vmu.cpp
 SOURCES += src/ranking.cpp src/ranking_wire.cpp
+SOURCES += src/vmu_lcd.cpp src/vmu_playfield.cpp
 OBJECTS = $(SOURCES:.cpp=.o) romdisk.o
 KOS_ROMDISK_DIR = build/romdisk
 CXXFLAGS += -std=c++17 -Wall -Wextra -MMD -MP
@@ -18,7 +19,7 @@ endif
 include $(KOS_BASE)/Makefile.rules
 
 $(TARGET): $(OBJECTS)
-	kos-c++ -o $@ $^ -Wl,--wrap=maple_queue_frame -lvorbis -logg -lsh4zam -lz -lkosfat -lm
+	kos-c++ -o $@ $^ -Wl,--wrap=maple_queue_frame,--wrap=maple_queue_flush -lvorbis -logg -lsh4zam -lz -lkosfat -lm
 
 romdisk.img: build/assets.stamp
 

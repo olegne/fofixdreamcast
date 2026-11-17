@@ -51,6 +51,7 @@ public:
     void queue(const Settings &settings);
     void poll();
     void flush();
+    bool busy() const { return thread_ || queued_; }
 
 private:
     void start();

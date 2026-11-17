@@ -8,6 +8,8 @@
 #include "song_library.hpp"
 #include "view.hpp"
 #include "utf8.hpp"
+#include "vmu_lcd.hpp"
+#include "vmu_playfield.hpp"
 
 #include <algorithm>
 #include <array>
@@ -772,6 +774,7 @@ int main() {
     apply_keyboard_settings(settings);
     MapleInput maple_input;
     maple_input.start();
+    static dc::VmuLcd vmu_lcd;
     dc::ScoreBook scores;
     dc::ScoreUpload score_upload;
     scores.load();
@@ -2137,6 +2140,31 @@ int main() {
         frame.upload_status = score_upload.status();
         frame.upload_ordinal = score_upload.ordinal();
         settings_writer.poll();
+        if (settings_writer.busy() || scores.save_status() == dc::ScoreBook::SaveStatus::pending ||
+            editor_save.worker) {
+            vmu_lcd.suspend();
+        } else {
+            const auto now = timer_ms_gettime64();
+            if (vmu_lcd.ready(now)) {
+                dc::VmuBitmap bitmap;
+                if (frame.screen == dc::Screen::play || frame.screen == dc::Screen::countdown) {
+                    dc::render_vmu_playfield(bitmap, song.guitar[frame.difficulty], round,
+                                             frame.time_ms, frame.held, frame.lefty);
+                } else {
+                    auto status = dc::VmuStatus::menu;
+                    if (frame.screen == dc::Screen::pause ||
+                        (frame.screen == dc::Screen::settings && settings_in_pause)) {
+                        status = dc::VmuStatus::paused;
+                    } else if (frame.screen == dc::Screen::results) {
+                        status = dc::VmuStatus::result;
+                    } else if (frame.screen == dc::Screen::credits) {
+                        status = dc::VmuStatus::credits;
+                    }
+                    dc::render_vmu_status(bitmap, status, static_cast<unsigned>(now / 250));
+                }
+                vmu_lcd.present(bitmap);
+            }
+        }
         if (frame.screen == dc::Screen::setlist) {
             frame.available = 0;
             if (!frame.library_item) {
