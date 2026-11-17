@@ -25,6 +25,14 @@ Depois do resultado, **Enter** ou **F1** avança. Se a pontuação entrar entre 
 
 Em **Settings → Video Settings**, escolha **640 × 480** ou **320 × 240** e aplique. Para reduzir o trabalho do renderizador, selecione meia frequência. Em uma saída de 60 Hz isso apresenta cerca de 30 quadros por segundo. O jogo continua recebendo entrada e atualizando o PCM em frequência cheia. O PowerVR oferece antialiasing horizontal 2× em 320 × 240. A saída ocupa a tela inteira e a VMU guarda as escolhas. O padrão é 640 × 480 em frequência cheia. O modo 320 × 240 depende do cabo e da tela para a prova física.
 
+## Tela da VMU
+
+A primeira VMU com tela LCD mostra uma pista de cinco linhas durante a contagem e a partida. As notas, acordes e sustains aparecem com cerca de um segundo de antecedência e descem até a linha de acerto. Os marcadores na base indicam as casas pressionadas e os acertos. A opção de canhoto também espelha a pista da VMU.
+
+O menu tem uma animação das notas. Pausa, resultado e créditos têm telas próprias. Na rolagem dos créditos aparece **Dreamcast port by angelo128bits**. A atualização da VMU é automática, limitada a cerca de 15 quadros por segundo. Os envios seguem os comandos do teclado e do controle na fila Maple e cedem às gravações.
+
+No Flycast, habilite **Floating VMUs** para exibir a tela emulada. Uma configuração ensaiada usou teclado na porta A, controle na B e VMU no primeiro slot do controle.
+
 ## Nomes e recordes
 
 O teclado Maple aceita caracteres acentuados conforme o mapa regional. Com o teclado identificado como US, segure **Alt direito** e pressione uma combinação da tabela. Solte as teclas e digite a letra. Use Shift na letra para obter a versão maiúscula. **Backspace** apaga um caractere inteiro.

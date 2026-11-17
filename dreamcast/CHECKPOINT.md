@@ -1,5 +1,24 @@
 # Checkpoint do Frets on Fire clássico
 
+## Pista da VMU e crédito do port
+
+Código na branch `dreamcast-classic`, commit `852c5b9f24c7c16f34fcf5669c976e8320f2a248`, árvore `651809e4683dffd07da3a644c8feead9d25fb214`. A CDI foi compilada com KallistiOS 2.2.1, GCC SH-4 15.1.0, SH4ZAM, libvorbis, libogg, libkosfat e zlib. A compilação isolada usou `make -C dreamcast cdi CLASSIC_DATA=/caminho/para/data` com `CXXFLAGS="-std=c++17 -Wall -Wextra -Werror -MMD -MP -DFRETSONFIRE_INPUT_TRACE"`. Os 26 arquivos do repertório e os 21 efeitos Ogg passaram na prova da imagem e do ROM disk.
+
+| Artefato | SHA-256 |
+| --- | --- |
+| ELF | `9172f16ddd98d44785e373d79533ece632ead75c4db33ed5d36fd035ec7b1c97` |
+| CDI | `21b854bfc01acb8b60a432502094637ea3598c74af96340a8e70af09182c1cee` |
+
+A VMU tem cinco linhas, linha de acerto, acordes, caudas das notas e marcação de acertos. Usa as notas da dificuldade selecionada e o relógio de áudio com a compensação A/V. No LCD 48 × 32 do Flycast, a primeira nota de Defy Amazing desceu da linha 6 até a linha 23 entre 3,07 s e 3,80 s. Um acorde F2+F4 apareceu junto e a pausa mostrou um quadro estático. O menu e os créditos têm movimento próprio. A bandeira de chegada do resultado foi confirmada no LCD do Flycast. A rolagem na TV mostra `Dreamcast port by` e `angelo128bits`, usando o espaço depois da versão. A duração dos créditos permaneceu em 35,5 s.
+
+A imagem usa um buffer fixo, tem trabalho limitado a 64 acordes por quadro e é atualizada no máximo uma vez a cada 67 ms. Cada transferência de LCD usa 200 bytes de dados. As imagens repetidas são descartadas e o envio fica atrás das leituras dos dispositivos no lote Maple. Os comandos são assíncronos e os salvamentos suspendem a animação. Na CDI testada, uma configuração foi gravada na VMU B1, com retomada do LCD em seguida. A retirada e a reinserção de B1 durante a reprodução mantiveram a posição musical, o teclado pausou e retomou, e a mesma VMU voltou a receber quadros. Outra tomada iniciou, pausou e retomou sem uma VMU.
+
+A sonda de renderização em SH-4 emulado mediu cerca de 36,3 µs por atualização típica e 295,1 µs com 64 acordes de cinco notas. Esses valores referem-se à formação da imagem. Nos primeiros 30 s de Defy Amazing, a comparação entre a CDI Maple anterior e esta CDI usou o mesmo perfil de Flycast. Os intervalos de avanço no relógio da faixa tiveram mediana de 17 ms, p95 de 28 ms e p99 de 37 ms nas duas. Todos os relatórios de teclado enviados no trecho medido foram confirmados pelo jogo.
+
+Defy Amazing completou 167,213 s na própria CDI entregue. Houve pausa, retomada, resultado, gravação na VMU e nova partida. O teclado confirmou 2.256 de 2.256 transições e a fila do jogo registrou zero estouros. Ao reaplicar os relatórios ao Linux no mesmo relógio, as 9.597 atualizações de placar e os 99.860 pontos foram iguais. 8.832.000 quadros PCM válidos coincidiram byte a byte entre a fila e a saída SDL do Flycast, sem faltas depois do boot. O maior intervalo entre iterações do convidado na partida foi de 77,06 ms.
+
+O usuário relatou que a CDI Maple anterior funcionou no Dreamcast físico. A nova tela LCD e sua cadência Maple ainda precisam do teste físico.
+
 ## Prioridade Maple, vídeo, biblioteca SD e leitura de áudio
 
 A CDI desta rodada foi compilada com KallistiOS 2.2.1, GCC SH-4 15.1.0, SH4ZAM, libvorbis, libogg, libkosfat e zlib. Código na branch `dreamcast-classic`, commit `58bd733d90410f6857cd1394041c0d32d0ec097a`, árvore `ec4d4392c8424970fbd87220165f020c6f1d4497`. O build isolado usou `make -C dreamcast cdi CLASSIC_DATA=/caminho/para/data` e `CXXFLAGS="-std=c++17 -Wall -Wextra -Werror -MMD -MP -DFRETSONFIRE_INPUT_TRACE"`. Os 26 arquivos originais do repertório e os 21 efeitos Ogg foram verificados na própria imagem, incluindo o ROM disk extraído do executável.
