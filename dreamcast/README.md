@@ -21,6 +21,10 @@ O jogo começa pelo menu principal. Em **Play Game**, selecione a biblioteca, a 
 
 Depois do resultado, **Enter** ou **F1** avança. Se a pontuação entrar entre as cinco melhores daquela faixa e dificuldade, digite o nome e confirme com **Enter** ou **F1**. **Esc** mantém o nome anterior. Depois escolha **Replay**, **Change Song** ou **Quit to Main Menu**. O jogo grava a tabela na primeira VMU disponível. No teste em Flycast, o teclado ficou na porta A e a VMU no primeiro slot do controle da porta B.
 
+## Vídeo
+
+Em **Settings → Video Settings**, escolha **640 × 480** ou **320 × 240** e aplique. Para reduzir o trabalho do renderizador, selecione meia frequência. Em uma saída de 60 Hz isso apresenta cerca de 30 quadros por segundo. O jogo continua recebendo entrada e atualizando o PCM em frequência cheia. O PowerVR oferece antialiasing horizontal 2× em 320 × 240. A saída ocupa a tela inteira e a VMU guarda as escolhas. O padrão é 640 × 480 em frequência cheia. O modo 320 × 240 depende do cabo e da tela para a prova física.
+
 ## Nomes e recordes
 
 O teclado Maple aceita caracteres acentuados conforme o mapa regional. Com o teclado identificado como US, segure **Alt direito** e pressione uma combinação da tabela. Solte as teclas e digite a letra. Use Shift na letra para obter a versão maiúscula. **Backspace** apaga um caractere inteiro.
@@ -44,7 +48,7 @@ O cliente usa IPv4 com a pilha de rede do KallistiOS e requer um adaptador de re
 
 ## Compilação
 
-Requisitos do port. KallistiOS 2.2.1, SH4ZAM, libvorbis, libogg e zlib em kos-ports, mkdcdisc, Python 3 com Pillow e pycollada.
+Requisitos do port. KallistiOS 2.2.1 com libkosfat, SH4ZAM, libvorbis, libogg e zlib em kos-ports, mkdcdisc, Python 3 com Pillow e pycollada.
 
 Extraia [FretsOnFire-1.3.110.tar.gz](https://sourceforge.net/projects/fretsonfire/files/fretsonfire/1.3.110/) em um diretório fora do checkout e use a pasta `data` como fonte dos gráficos, do áudio e dos charts.
 

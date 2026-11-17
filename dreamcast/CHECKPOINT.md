@@ -1,5 +1,47 @@
 # Checkpoint do Frets on Fire clássico
 
+## Prioridade Maple, vídeo, biblioteca SD e leitura de áudio
+
+A CDI desta rodada foi compilada com KallistiOS 2.2.1, GCC SH-4 15.1.0, SH4ZAM, libvorbis, libogg, libkosfat e zlib. Código na branch `dreamcast-classic`, commit `58bd733d90410f6857cd1394041c0d32d0ec097a`, árvore `ec4d4392c8424970fbd87220165f020c6f1d4497`. O build isolado usou `make -C dreamcast cdi CLASSIC_DATA=/caminho/para/data` e `CXXFLAGS="-std=c++17 -Wall -Wextra -Werror -MMD -MP -DFRETSONFIRE_INPUT_TRACE"`. Os 26 arquivos originais do repertório e os 21 efeitos Ogg foram verificados na própria imagem, incluindo o ROM disk extraído do executável.
+
+| Artefato | SHA-256 |
+| --- | --- |
+| ELF | `6bdb8a58052d4c8065e4dfc52a2ffec5d8726f5b22313f1ee0680e123a8f955f` |
+| CDI | `7c1f32be108894b8665207edbdddf340bcb8f59b130328a28c11f8c6a1cf644c` |
+
+### Controles e interface
+
+O teclado Maple toma a entrada assim que identificado, mesmo antes do primeiro relatório de teclas. A desconexão deixa o primeiro controle assumir. Na troca, o jogo encerra o sustain da entrada anterior, descarta palhetadas pendentes e aguarda a soltura de teclas ou botões já pressionados. Os testes Flycast usaram o teclado nas portas A e C, controle na B e VMU no slot B1. A sonda tentou A, B, START e direcional simultâneos com teclado presente, passou por pausa, retomada e reconexão, e conferiu uma palhetada de cada fonte após a troca. O controle sozinho abriu o Tutorial no boot. A sonda dirigida também confirmou que um Esc mantido antes de conectar não pausa e que um B mantido ao fechar a pausa não vira casa na volta.
+
+A abertura roda as barras cumulativamente como o clássico e eleva as caudas com as cabeças. A luminância foi calibrada em 732 amostras da versão Linux com suas opções de filtragem. Em Defy Amazing no Flycast, zero de 86 quadros perdeu a barra distante. A razão mediana da energia caiu de 1,007 para 0,501 no trecho medido e as médias correspondentes no Linux ficaram entre 0,48 e 0,53. As diferenças de amostragem entre PowerVR e Mesa ainda afetam pixels e contornos. O aviso de recorde com truques foi conferido lado a lado, depois de `fastforward` em Defy Easy. Os limites do texto foram x65–494 e y198–231 nos dois. A partida comum gravou `ACE` na VMU. A tela de resultado e sua locução aguardam a saída do palco.
+
+### Leitura de áudio e vídeo
+
+A leitura do cache de 16 KiB por trilha foi alinhada aos setores ISO9660 para manter o DMA de múltiplos setores depois de seeks Vorbis. Em 30 s de Defy no mesmo perfil instrumentado do Flycast, os intervalos acima de 50 ms foram de 47 para 4 e o p99 caiu de 55,384 para 36,960 ms. O maior intervalo foi de 89,213 para 59,029 ms. A leitura no pior quadro passou de 72,454 para 38,389 ms no máximo da amostra. Sete janelas estéreo da variante limpa antes e depois de pausar somaram 313.110 quadros iguais amostra por amostra depois do alinhamento por fase. Essa medição é do emulador e o limite de leitura óptica do Dreamcast físico segue pendente.
+
+O menu aplica 640 × 480 ou 320 × 240, renderização a cada atualização ou à metade da frequência de vídeo, e antialiasing horizontal 2× no modo 320 × 240. O limite só pula renderização. Um ensaio mediu 90 apresentações em 90 VBlanks em frequência cheia e 44–45 com o limite. As opções voltaram da VMU após reboot; um save antigo conservou o atraso, o tamanho do texto, o modo canhoto e as teclas. O editor abriu nos dois modos. Em 320 × 240 no Flycast, o enquadramento capturado desceu 14 px quando apresentado em 640 × 480. 240p, compatibilidade dos cabos e velocidade no console precisam do ensaio físico.
+
+### Biblioteca externa
+
+O editor monta a primeira partição MBR FAT16/FAT32 do cartão somente para leitura. O jogo abre Ogg e MIDI já copiados ao cartão, ou deixa criar o chart e gravá-lo na VMU. O teste usou a montagem FAT e um dispositivo de blocos de teste no Flycast. A faixa com MIDI próprio, acorde, mudança de BPM e áudio de 32/44,1 kHz foi exercitada. O editor fez prévia, salvou na VMU e reabriu o chart após reiniciar. Cartão sem adaptador e partição com BPB inválido foram recusados sem interromper o acesso ao Tutorial. A transferência do adaptador serial SPI precisa de teste físico. A extração de DVD de Guitar Hero permanece no PC e sua biblioteca convertida pode ser copiada ao SD. Os discos originais e o ranking histórico seguem sem validação.
+
+Dois novos MIDIs de teste, SMF 0 e 1, tiveram nove gemas, horários, sustains e marcações de HOPO iguais aos do leitor Linux. Os casos incluíram running status, nota desligada com velocidade zero, tempo variável, canal alternado e pista de baixo. Quatro arquivos inválidos ou com tempo SMPTE foram rejeitados. A cobertura ainda é a dos formatos de chart ensaiados.
+
+### Replays integrais da CDI entregue
+
+As quatro faixas passaram por partida completa, pausa, retomada, resultado, gravação na VMU e replay. Foram observadas as 5.142 transições de entrada pelo Maple e 41.762 atualizações de pontuação iguais ao Linux com as mesmas entradas e o relógio da partida.
+
+| Faixa · dificuldade | Transições Maple/SDL | Pontos | Atualizações iguais ao Linux | Faltas SDL durante o fluxo | Intervalos acima de 50 ms | Maior intervalo no convidado |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Defy The Machine · Amazing | 2.256/2.256 | 99.945 | 9.603 | 16 | 180 | 75,67 ms |
+| Bang Bang, Mystery Man · Medium | 852/852 | 116.177 | 11.320 | 3 | 131 | 76,69 ms |
+| This Week I've Been Mostly Playing Guitar · Amazing | 1.804/1.804 | 164.299 | 12.092 | 8 | 162 | 75,78 ms |
+| Tutorial · Medium | 230/230 | 3.232 | 8.747 | 0 | 0 | 41,79 ms |
+
+O Flycast 2.7 conservou 37.104.640 quadros PCM válidos, idênticos entre a fila e a saída SDL. O perfil de captura usou fila de 16.384 amostras e dois workers para o render. A coluna de faltas exclui o boot e soma 27 blocos zerados na saída SDL. As medidas de iteração do convidado ainda precisam da mesma prova no Dreamcast físico.
+
+Os primeiros replays das três músicas concorreram por recursos do host com três instâncias do Flycast. Na repetição com até duas instâncias e o mesmo perfil de áudio, os blocos de falta após o boot foram 0 em Defy The Machine, 0 em Bang Bang, Mystery Man, 0 em This Week I've Been Mostly Playing Guitar. A prova conservou e analisou a saída original de cada execução.
+
 ## Linhas da pista, transições do palco e pausa dos efeitos
 
 Código na branch `dreamcast-classic`, commit `fb08b08a56fd443312316024839bd6394c9f1534`, árvore `66ee63e224e83e020ff0283bde6c110892f770a1`. Build isolado com KallistiOS 2.2.1, GCC SH-4 15.1.0, SH4ZAM, libvorbis, libogg e zlib. Comando `make -C dreamcast cdi CLASSIC_DATA=/caminho/para/data` com `CXXFLAGS="-std=c++17 -Wall -Wextra -Werror -MMD -MP -DFRETSONFIRE_INPUT_TRACE"`. Os 26 arquivos do repertório e os 21 efeitos Ogg foram conferidos contra o pacote Linux 1.3.110 diretamente na imagem. O ROM disk extraído do executável da CDI coincide com o do ELF.
