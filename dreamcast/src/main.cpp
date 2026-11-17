@@ -4,6 +4,7 @@
 #include "chooser.hpp"
 #include "language.hpp"
 #include "ranking.hpp"
+#include "rumble.hpp"
 #include "settings.hpp"
 #include "song_library.hpp"
 #include "view.hpp"
@@ -932,6 +933,7 @@ int main() {
         result_audio.resume();
     };
     const auto to_setlist = [&] {
+        dc::rumble_context(false, frame.input == dc::InputDevice::keyboard);
         menu_audio.fade_out(1000);
         audio.stop();
         frame.countdown = 0;
@@ -949,6 +951,7 @@ int main() {
         chooser_selection();
     };
     const auto to_main = [&] {
+        dc::rumble_context(false, frame.input == dc::InputDevice::keyboard);
         audio.stop();
         menu_audio.stop();
         frame.countdown = 0;
@@ -1098,6 +1101,7 @@ int main() {
         return true;
     };
     const auto begin_countdown = [&] {
+        dc::rumble_reset();
         maple_input.clear_keys();
         cheat_prefix.clear();
         frame.cheat_message = nullptr;
@@ -1154,6 +1158,7 @@ int main() {
                     unsigned(mallinfo().uordblks), unsigned(pvr_mem_available()), unsigned(snd_mem_available()));
     };
     const auto show_pause = [&] {
+        dc::rumble_context(false, frame.input == dc::InputDevice::keyboard);
         result_audio.pause();
         sounds.pause();
         frame.screen = dc::Screen::pause;
@@ -1179,6 +1184,7 @@ int main() {
     };
 
     const auto record_pick = [&](dc::Pick result, int when, uint8_t frets, bool after_stage_update = false) {
+        dc::rumble_observe(round.multiplier(), result == dc::Pick::hit);
         audio.guitar_gain(round.guitar_muted ? 0.0f : 1.0f, result != dc::Pick::neutral);
         music_level = audio.backing_level();
         if (result == dc::Pick::hit) {
@@ -1228,6 +1234,8 @@ int main() {
         frame.sustain_expired = false;
         const auto previous_screen = frame.screen;
         auto input = maple_input.snapshot();
+        dc::rumble_context(frame.screen == dc::Screen::play,
+                           input.device == dc::InputDevice::keyboard);
         const bool source_changed = input.generation != previous_input.generation;
         unsigned pressed = !source_changed && input.device == dc::InputDevice::controller ?
                            input.buttons & ~previous_input.buttons : 0;
@@ -1949,6 +1957,7 @@ int main() {
         const bool pause_layer = frame.screen == dc::Screen::pause ||
                                  (frame.screen == dc::Screen::settings && settings_in_pause);
         const bool interactive = frame.screen == dc::Screen::play;
+        dc::rumble_context(interactive, input.device == dc::InputDevice::keyboard);
         if (frame.countdown > 0.0f) {
             const int remaining = std::max(0, int(countdown_ms) - int(timer_ms_gettime64() - countdown_start));
             frame.countdown = remaining * 1000.0f / song.initial_us_per_beat;
@@ -2092,6 +2101,7 @@ int main() {
         }
 
         dc_gameplay_active = frame.screen == dc::Screen::play;
+        dc::rumble_context(dc_gameplay_active, input.device == dc::InputDevice::keyboard);
         if (frame.screen == dc::Screen::play || (frame.screen == dc::Screen::pause && frame.countdown <= 0)) {
             if (songs[song_index].tutorial) {
                 tutorial_cue(frame, tutorial);
@@ -2145,7 +2155,7 @@ int main() {
             vmu_lcd.suspend();
         } else {
             const auto now = timer_ms_gettime64();
-            if (vmu_lcd.ready(now)) {
+            if (vmu_lcd.ready(now, input.device == dc::InputDevice::keyboard ? 1 : -1)) {
                 dc::VmuBitmap bitmap;
                 if (frame.screen == dc::Screen::play || frame.screen == dc::Screen::countdown) {
                     dc::render_vmu_playfield(bitmap, song.guitar[frame.difficulty], round,

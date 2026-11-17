@@ -4,7 +4,7 @@ Port em desenvolvimento do Frets on Fire clássico da Unreal Voodoo. A referênc
 
 ## Controles
 
-O teclado Maple assume o comando assim que é reconhecido em qualquer porta. O jogo ignora os botões do controle enquanto houver teclado. Ao remover o teclado, o primeiro controle conectado assume. Solte as teclas ou os botões do dispositivo que assumiu antes de voltar a tocar. Um controle conectado pode continuar com a VMU para gravação.
+O teclado Maple assume o comando assim que é reconhecido em qualquer porta. O jogo ignora os botões do controle enquanto houver teclado. Ao remover o teclado, o primeiro controle conectado assume. Solte as teclas ou os botões do dispositivo que assumiu antes de voltar a tocar. Com teclado, conecte o controle com VMU e rumble na **porta 2 (B)** para receber a animação e a vibração. A VMU continua disponível para gravação.
 
 | Ação | Teclado Maple | Controle Dreamcast |
 | --- | --- | --- |
@@ -27,11 +27,25 @@ Em **Settings → Video Settings**, escolha **640 × 480** ou **320 × 240** e a
 
 ## Tela da VMU
 
-A primeira VMU com tela LCD mostra uma pista de cinco linhas durante a contagem e a partida. As notas, acordes e sustains aparecem com cerca de um segundo de antecedência e descem até a linha de acerto. Os marcadores na base indicam as casas pressionadas e os acertos. A opção de canhoto também espelha a pista da VMU.
+Com teclado Maple ativo, a tela é enviada à primeira VMU com LCD da **porta 2 (B)**, mesmo quando há outra VMU em uma porta anterior. Sem teclado, permanece a seleção da primeira VMU com LCD disponível. A pista tem cinco linhas durante a contagem e a partida. As notas, acordes e sustains aparecem com cerca de um segundo de antecedência e descem até a linha de acerto. Os marcadores na base indicam as casas pressionadas e os acertos. A opção de canhoto também espelha a pista da VMU.
 
 O menu tem uma animação das notas. Pausa, resultado e créditos têm telas próprias. Na rolagem dos créditos aparece **Dreamcast port by angelo128bits**. A atualização da VMU é automática, limitada a cerca de 15 quadros por segundo. Os envios seguem os comandos do teclado e do controle na fila Maple e cedem às gravações.
 
 No Flycast, habilite **Floating VMUs** para exibir a tela emulada. Uma configuração ensaiada usou teclado na porta A, controle na B e VMU no primeiro slot do controle.
+
+## Vibração
+
+O rumble dá um pulso curto a cada aumento do multiplicador de acertos. As regras originais continuam iguais:
+
+| Sequência de acertos | Mudança | Retorno |
+| --- | --- | --- |
+| 10 | 1× → 2× | Um pulso |
+| 20 | 2× → 3× | Um pulso |
+| 30 | 3× → 4× | Um pulso |
+
+O multiplicador máximo é 4×. Manter a sequência nesse nível não dispara novos pulsos. Depois de perder a sequência, alcançar os níveis novamente volta a vibrar. Sustains e notas de um mesmo acorde não produzem pulsos adicionais.
+
+Com teclado, o destino é o rumble da **porta 2 (B)**. Sem teclado, é o rumble do primeiro controle conectado, que comanda o jogo. A vibração é interrompida ao pausar, sair da partida, reiniciar ou trocar o dispositivo de entrada. Os comandos são assíncronos, com parada controlada pelo serviço Maple. O jogo continua normalmente quando não há rumble conectado.
 
 ## Nomes e recordes
 

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "vmu_lcd.hpp"
+#include "rumble.hpp"
 
 #include <arch/irq.h>
 #include <dc/maple.h>
@@ -13,6 +14,8 @@ extern "C" void __real_maple_queue_flush();
 extern "C" {
 volatile uint32_t dc_vmu_lcd_submitted = 0;
 volatile uint32_t dc_vmu_lcd_acknowledged = 0;
+volatile int32_t dc_vmu_lcd_last_port = -1;
+volatile int32_t dc_vmu_lcd_last_unit = -1;
 }
 #endif
 
@@ -84,6 +87,8 @@ void queue_lcd_after_polling() {
         }
 #ifdef FRETSONFIRE_INPUT_TRACE
         ++dc_vmu_lcd_submitted;
+        dc_vmu_lcd_last_port = lcd.frame.dst_port;
+        dc_vmu_lcd_last_unit = lcd.frame.dst_unit;
 #endif
     }
 }
@@ -92,16 +97,30 @@ void queue_lcd_after_polling() {
 
 extern "C" void __wrap_maple_queue_flush() {
     // KOS has already queued device detection, keyboard and controller input
-    // here. The optional LCD packet goes at the tail of their DMA batch.
+    // here. Rumble deadlines and stops precede the optional LCD packet.
+    dc::rumble_after_polling();
     queue_lcd_after_polling();
     __real_maple_queue_flush();
 }
 
 namespace dc {
 
-bool VmuLcd::ready(uint64_t now_ms) {
+bool VmuLcd::ready(uint64_t now_ms, int preferred_port) {
     active_ = true;
     port_ = -1;
+    if (preferred_port_ != preferred_port) {
+        irq_disable_scoped();
+        preferred_port_ = preferred_port;
+        ++generation;
+        // Cancel a frame prepared for the old input mode before DMA submission.
+        // A frame already in flight owns its buffer until its reply arrives.
+        if (lcd.frame.state == MAPLE_FRAME_UNSENT) {
+            discard_unsent();
+        }
+        lcd.acknowledged = false;
+        lcd.retry_later = false;
+        next_refresh_ms_ = 0;
+    }
     if (now_ms < next_refresh_ms_) {
         return false;
     }
@@ -119,7 +138,18 @@ bool VmuLcd::ready(uint64_t now_ms) {
     if (lcd.frame.queued || lcd.frame.state != MAPLE_FRAME_VACANT) {
         return false;
     }
-    const auto *device = maple_enum_type(0, MAPLE_FUNC_LCD);
+    const maple_device_t *device = nullptr;
+    if (preferred_port_ >= 0) {
+        for (unsigned unit = 0; unit < MAPLE_UNIT_COUNT; ++unit) {
+            const auto *candidate = maple_enum_dev(preferred_port_, unit);
+            if (candidate && (candidate->info.functions & MAPLE_FUNC_LCD)) {
+                device = candidate;
+                break;
+            }
+        }
+    } else {
+        device = maple_enum_type(0, MAPLE_FUNC_LCD);
+    }
     if (!lcd_idle(device)) {
         return false;
     }
