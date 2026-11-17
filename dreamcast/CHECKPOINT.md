@@ -1,5 +1,46 @@
 # Checkpoint do Frets on Fire clássico
 
+## Linhas da pista, transições do palco e pausa dos efeitos
+
+Código na branch `dreamcast-classic`, commit `fb08b08a56fd443312316024839bd6394c9f1534`, árvore `66ee63e224e83e020ff0283bde6c110892f770a1`. Build isolado com KallistiOS 2.2.1, GCC SH-4 15.1.0, SH4ZAM, libvorbis, libogg e zlib. Comando `make -C dreamcast cdi CLASSIC_DATA=/caminho/para/data` com `CXXFLAGS="-std=c++17 -Wall -Wextra -Werror -MMD -MP -DFRETSONFIRE_INPUT_TRACE"`. Os 26 arquivos do repertório e os 21 efeitos Ogg foram conferidos contra o pacote Linux 1.3.110 diretamente na imagem. O ROM disk extraído do executável da CDI coincide com o do ELF.
+
+| Artefato | SHA-256 |
+| --- | --- |
+| ELF | `b20da44054ce763ad5c41a9aee70a512ce2bf19b6aef3de6876d43a63d6b6359` |
+| CDI | `8b083e6e4b4aac8c7a87316d3c31e07c8f4b8c670e554b742b366fc83594f8d9` |
+
+### Linhas horizontais da pista
+
+A região opaca da textura original fica abaixo de um pixel quando a linha está distante. O filtro bilinear da CDI anterior podia amostrar somente as margens transparentes. O desenho integra a cobertura vertical do pixel na posição projetada e preserva a textura no sentido horizontal. As linhas móveis também continuam atrás da linha de acerto e desvanecem até `z=-1`, como na referência.
+
+No A/B do trecho de 1,7 a 5,8 s de Defy Amazing a 640 × 480, o limiar de energia verde abaixo de 8 sinalizou 86 de 215 quadros da versão anterior e zero de 209 com a correção. A energia da linha distante dividida pela energia prevista pela projeção passou de p10/p50/p90 de 0,008/1,593/2,074 para 0,984/1,005/1,026. Na retirada atrás dos trastes, os mesmos percentis na candidata foram 0,983/0,996/1,004 em 44 quadros. Repetindo na própria CDI entregue, foram zero desaparecimentos em 118 amostras de 20 fps, com p10/p50/p90 de 0,983/1,007/1,029.
+
+### Outros ajustes
+
+- O palco usa a duração original de 512 ms, a curva anterior de visibilidade e o deslocamento lateral das luzes. O plano de fundo mantém uma única alocação de VRAM. A sequência gravada no Flycast mostrou a saída dos trastes e das cordas até o resultado. No ensaio de 150 quadros contra `Layer.render` do Linux, o alfa coincidiu e o desvio máximo do centro foi de 0,000123 px.
+- Ao pausar efeitos curtos, o mixer envia os comandos de parada em lote e estima a posição de retomada pelo cursor e pela confirmação do ARM. Na sonda Flycast com 1, 3 e 8 vozes, o lote parou em cerca de 10 ms. A voz medida, `fiba6`, repetiu até seis amostras (0,14 ms). Em Defy, com erro, pausa e retomada pelo Maple, o efeito fiba3 repetiu entre 256 e 261 amostras na imagem anterior e entre uma e seis amostras após a correção. O cursor musical retomou em 1.040 ms nas duas imagens.
+- Os modos Chilly e LightGraphics ativados pelo teclado Maple abriram o Tutorial na CDI final. As sondas capturaram quadros de jogo em 1,5 e 3 s para os dois modos.
+- A caixa de recorde quebra o texto dentro da mesma faixa horizontal do original e posiciona nome e cursor após a última linha. Com o remapeamento X carregado da VMU, foi possível abrir a caixa com X, confirmar `ACE-1` com F1, gravar e voltar à seleção.
+
+### Partidas completas na CDI testada
+
+As quatro sessões passaram por pausa, retomada, resultado, gravação do recorde na VMU e nova partida. As 5.142 transições enviadas pelo SDL foram confirmadas pelo estado recebido no Maple. Os mesmos horários e estados produziram os mesmos alvos e placares no Linux em 40.211 atualizações.
+
+| Faixa · dificuldade | Transições Maple / SDL | Pontos | Avanços iguais ao Linux | Faltas SDL do início ao fim | Maior intervalo do convidado |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Defy The Machine · Amazing | 2256/2256 | 99.866 | 9.057/9.057 | 0 | 110.66 ms |
+| Bang Bang, Mystery Man · Medium | 852/852 | 116.172 | 10.874/10.874 | 0 | 98.01 ms |
+| This Week I've Been Mostly Playing Guitar · Amazing | 1804/1804 | 155.766 | 11.530/11.530 | 1 | 101.31 ms |
+| Tutorial · Medium | 230/230 | 3.434 | 8.750/8.750 | 0 | 41.55 ms |
+
+A captura no Flycast 2.7 usou dois workers de renderização, fila SDL de 16.384 amostras e PCM estéreo a 44,1 kHz. Os 37.158.912 quadros válidos do callback coincidiram byte a byte com a saída anterior à fila. A sonda isolou um bloco de 1.024 amostras (23,22 ms) zerado pelo callback SDL após o início das partidas. O bloco apareceu em This Week aos 139,55 s da captura. Na repetição completa da mesma CDI, com o mesmo perfil do Flycast, o callback não inseriu cortes durante partida, pausa ou resultados. As 1.804 transições chegaram ao Maple e os 11.530 avanços coincidiram com o Linux, com placar de 156.902 pontos nas duas execuções comparadas. A fila do host acrescenta latência de captura. As medidas de tempo do convidado não medem a cadência do console físico.
+
+Também foram analisadas 18 janelas das saídas PCM originais de Defy e outras 18 de Bang Bang, do início até os últimos segundos. O alinhamento estimado ficou constante dentro de cada fase da partida. A janela final de Defy teve correlação de 0,99999999 e ganho de 0,99973 no acompanhamento e 0,99976 na guitarra. Em Bang Bang, todas as janelas passaram de 0,9954 de correlação. A comparação de Defy incluiu erros e transições do volume da guitarra, com instantes efetivos de entrada diferentes nas sessões independentes. O alinhamento foi usado apenas na análise. As capturas conservaram o PCM de cada execução.
+
+### Limites da validação
+
+O giro das barras e a elevação dos sustains durante a breve entrada do palco, a luminância das barras comparada ao filtro de textura do PC, diferenças de tipografia e o aviso de recorde após uso de truque ainda diferem do Linux. A matriz também registra a validação física, o endpoint histórico de recordes e os DVDs opcionais. Em Defy, os maiores saltos do relógio do convidado reaparecem nas mesmas posições musicais nas capturas com e sem vídeo e coincidem com a passagem de fronteiras de reabastecimento do PCM. Na análise com os Ogg originais, 133 de 133 saltos de cursor acima de 50 ms seguiram um reabastecimento com pedido de bytes comprimidos. Um modelo do cache de 16 KiB previu carga em 74 desses casos. A simulação não separa o custo de decodificar, ler o disco e obter a posição do ARM. A cadência no console requer instrumentação própria. Consulte o [roteiro de bancada](README.md#validação-no-dreamcast-físico).
+
 ## Editor, ranking, efeitos e qualificação da execução
 
 Código na branch `dreamcast-classic`, commit `d302454082be640b2bd004d22635d178c75c52f8`, árvore `f6e75f09c9b82e2d9fe2d102f2e2e273ba8e46da`. Compilação com KallistiOS 2.2.1, GCC SH-4 15.1.0, SH4ZAM, libvorbis, libogg e zlib. Comando `make -C dreamcast cdi CLASSIC_DATA=/caminho/para/data` com `CXXFLAGS="-std=c++17 -Wall -Wextra -Werror -MMD -MP -DFRETSONFIRE_INPUT_TRACE"`. Foram verificados os 26 arquivos originais do repertório e os 21 efeitos Ogg. O ROM disk do executável extraído da CDI foi comparado ao do ELF.
