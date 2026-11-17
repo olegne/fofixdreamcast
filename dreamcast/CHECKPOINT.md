@@ -1,5 +1,42 @@
 # Checkpoint do Frets on Fire clássico
 
+## Perspectiva das notas e integração de recursos clássicos
+
+Código da candidata de diagnóstico na branch `dreamcast-classic`, commit `641314b904cea46e7d9c083d94fc72e0e4fedb97`, árvore `963894227e50ef3230616b0736df07dc5c12d58f`. O build usa KallistiOS 2.2.1, GCC SH-4 15.1.0, SH4ZAM, libvorbis, libogg e zlib. Foi gerado com `make -C dreamcast cdi CLASSIC_DATA=/caminho/para/data`, `CXXFLAGS="-std=c++17 -Wall -Wextra -Werror -MMD -MP -DFRETSONFIRE_INPUT_TRACE"` e a pasta `songs` do pacote 1.3.110 para Linux. O pacote de teste distribui as três faixas originais e o Tutorial. A extração da própria CDI bateu byte a byte com os 26 arquivos originais do repertório. O ROM disk do ELF coincide com o do executável extraído da CDI. Os 21 efeitos sonoros Ogg mantêm os bytes do pacote Linux.
+
+| Artefato de diagnóstico | SHA-256 |
+| --- | --- |
+| ELF | `7d7a66291c9428cf22906892202dbdeff17d5ee75c9d7808dbc228ac6288fb27` |
+| CDI | `2be92484f3fe642b7a8cf8743e85148405b93affcd5c7c0d9fa20c6d16ecadfb` |
+
+O renderizador trocava a malha por uma imagem plana após a 14ª casa visível ou no fim da pista. A imagem usava a projeção da linha de acerto, o que deixava mais altas e verticais as notas distantes. Em z=11,5, o bitmap tinha 12,5 px de altura e a malha original projetada tinha 5,5 px. A candidata mantém a mesma malha 3D em todo o percurso, inclusive ao aparecer no horizonte com alfa reduzido. Notas perdidas passam pela linha em cinza, com a altura comprimida como no Linux.
+
+Os strips reduziram o envio de uma nota de 426 para 170 vértices e o marcador HOPO de 180 para 84. A reconstrução a partir dos strips preservou os 142 triângulos da nota e os 60 do HOPO, com as posições e fatores de luz originais. No caso de 40 cabeças e 39 marcadores do Tutorial, são 322.432 bytes de vértices de nota, além dos trastes, caudas e demais efeitos. O quadro de Defy Amazing de 3,008 s no Flycast mostra a nova nota deitada no mesmo plano da pista que o Linux em 3,010 s. [Comparação dos três quadros](https://chatgpt.com/library?file_id=libfile_4375eb9b59048191b337ccc88efa0dae&account_id=personal).
+
+O seletor ganhou navegação por biblioteca, filtro, rótulos convertidos para PVR e prévia das faixas depois de 1.024 ms. O áudio oferece backing, guitarra e rhythm, além de volumes separados e fade nas transições. O editor abre charts existentes ou cria um chart a partir de Ogg preparado no PC. A VMU preserva configurações, recordes e alterações do editor. O importador de Guitar Hero roda no PC e prepara a pasta que entra no disco, com prova do decodificador original em 15 canais de fixtures. Os 15 catálogos de tradução foram incorporados, e Chilly e LightGraphics podem ser habilitados nos ajustes.
+
+O ensaio de regras executado novamente após as mudanças passou nas dez combinações originais, com 5.662 transições idênticas no Linux e Dreamcast com o mesmo relógio. O teste do editor por Maple gravou um acorde F1+F2 na VMU. Após reiniciar, o seletor abriu a faixa importada com a dificuldade Amazing. O leitor do Linux encontrou nos dois MIDI o acorde de 0 a 122,950750 ms. A configuração testada foi restaurada após reiniciar e, durante a pausa, a alteração no volume da guitarra persistiu sem mudar o cursor de 1.553 ms na retomada.
+
+As quatro sessões da mesma CDI chegaram ao resultado e iniciaram uma segunda partida. As 40.273 atualizações de pontuação e todos os alvos confirmados coincidiram com o Linux quando o original recebeu os relatórios Maple e horários efetivos de cada ensaio.
+
+| Música e dificuldade | Alvos | Pontos | Atualizações iguais ao Linux | Blocos SDL em falta durante a música | Intervalo máximo no jogo |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Defy The Machine · Amazing | 611 / 614 | 100.032 | 9.115 / 9.115 | 0 | 113,60 ms |
+| Bang Bang, Mystery Man · Medium | 244 / 247 | 116.160 | 10.873 / 10.873 | 24 | 110,15 ms |
+| This Week I've Been Mostly Playing Guitar · Amazing | 547 / 550 | 164.116 | 11.533 / 11.533 | 12 | 96,99 ms |
+| Tutorial · Medium | 44 / 59 | 4.242 | 8.752 / 8.752 | 1 | 43,73 ms |
+
+Os replays incluem erros intencionais e pausa durante a música. Os quatro registraram zero estouros da fila de entrada do jogo. O SDL recebeu todos os 2.256, 852 e 1.804 eventos instrumentados em Defy, Bang Bang e This Week. O Maple emulado observou 2.254, 852 e 1.802, respectivamente. Uma segunda tomada de Defy com a gravação de vídeo desligada observou 2.252 de 2.256. A passagem de todos os pulsos de teste pela emulação permanece um ponto aberto. A igualdade da tabela usa o horário e a entrada observados no jogo.
+
+A análise de áudio guarda o PCM de entrada na fila SDL e a saída original da captura. A sonda identifica os blocos de 1.024 amostras que o callback insere quando a fila fica vazia. As amostras válidas coincidiram byte a byte com a entrada da fila nos quatro ensaios. O vídeo contínuo de Defy conserva duas faixas de áudio, uma de cada execução, com atraso inicial registrado de 141,67 ms no lado Dreamcast. A montagem aplica um deslocamento inicial e conserva a duração, o ganho e a afinação. As outras três referências Linux completas têm PCM e registros de partida, com cobertura visual em quadros nas sessões que conseguiram gravá-los.
+
+As sessões com gravação registraram 441, 409, 500 e 0 intervalos acima de 50 ms no jogo, na ordem da tabela. O pico de heap na entrada das quatro faixas foi inferior a 4,72 MB. A consulta a `pvr_get_stats` não mediu bytes no caminho direto por Store Queues. As medidas de quadro e áudio são do Flycast e do host usado nos ensaios.
+
+Na candidata, o português foi restaurado da VMU após reiniciar. Os modos Chilly e LightGraphics foram aplicados pelo menu e renderizaram o Tutorial no Flycast. As capturas foram comparadas aos temas correspondentes do Linux. O teste de `uptomytempo` ligou e desligou Jurgen, registrou 22 alvos, e `fastforward` abriu o resultado sem caixa de recorde.
+
+A [matriz](PARIDADE.md) relaciona as diferenças conhecidas. Para encerrar os ensaios virtualizados, além das partidas integrais, conferir a fase da luz em mudanças de andamento, os temas, a interface completa do editor e os serviços de classificação. O teste físico requer Dreamcast em vídeo 4:3, teclado Maple na porta A e VMU em outro controle. Verificar boot a frio, executar as quatro faixas, alternar Enter e Shift direito com acordes e sustains, pausar e retomar em sustain, conferir AICA pelos dois canais e confirmar recorde e configuração em um segundo boot.
+
+
 ## Cores, efeitos originais, recordes e repertório
 
 A candidata parte de `d28932b2096461dbae8f741bda1b2171ddb20fb4` de `dreamcast-classic`. Mantém SH4ZAM, Store Queues, projeções em cache e leitura de CD alinhada. O build usa KallistiOS 2.2.1, GCC 15.1.0 e o comando do [README](README.md), com `CXXFLAGS="-std=c++17 -Wall -Wextra -Werror -MMD -MP -DFRETSONFIRE_INPUT_TRACE"` para a instrumentação de entrada. A sintaxe do build sem a macro de rastreamento também foi verificada.
