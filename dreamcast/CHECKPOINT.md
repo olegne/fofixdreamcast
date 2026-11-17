@@ -1,5 +1,32 @@
 # Checkpoint do Frets on Fire clássico
 
+## VMU na porta 2 com teclado e rumble nos multiplicadores — 17/11/2026
+
+Continuação da CDI `FretsOnFire_13110_Dreamcast_VMU.cdi` de SHA-256 `21b854bfc01acb8b60a432502094637ea3598c74af96340a8e70af09182c1cee`. Código na branch `dreamcast-classic`, commit `55e50a24709878490ce407850abbf29c2e3302c4`, árvore `99f37d1c95d98f92a032ade3653e9d5876eba36b`. Compilação com KallistiOS 2.2.1 (tag oficial `b125c930da1a7969c5b9760da98254c666b3eeba`), GCC SH-4 15.1.0, libvorbis, libogg, SH4ZAM, zlib, libkosfat e mkdcdisc 0.0.4. Comando `make -C dreamcast cdi CLASSIC_DATA=/caminho/para/data`, com `CXXFLAGS="-std=c++17 -Wall -Wextra -Werror -MMD -MP -DFRETSONFIRE_INPUT_TRACE"`. O build terminou sem erros ou avisos.
+
+| Artefato final testado | SHA-256 |
+| --- | --- |
+| ELF | `694c0d2421a37d01e7fc7c35101927b7e062b072475124822d0821f7d9c4834f` |
+| CDI | `ba6a20f629d08b347bbb91635b559b8d5e785a4d15e3da1a18c78f332b22eb35` |
+
+A CDI tem 42.291.913 bytes. A inspeção da imagem confirmou os mesmos 26 arquivos de músicas, 21 efeitos Ogg e 111 arquivos do ROMFS, idênticos byte a byte aos da imagem indicada pelo usuário. Nenhum recurso foi acrescentado ou removido. A árvore ISO9660 muda somente em `1ST_READ.BIN`; o contêiner ROMFS pode ter organização/metadados de geração diferentes, com todos os conteúdos preservados.
+
+### Comportamento
+
+Com teclado Maple ativo, o LCD é selecionado exclusivamente entre os dispositivos da porta física B (porta 2, índice 1). A ausência de VMU em B não redireciona a animação a outro controle. Sem teclado, a seleção original do primeiro LCD disponível permanece. A mudança de modo cancela quadros ainda não enviados e invalida confirmações do modo anterior sem modificar buffers DMA em andamento.
+
+O rumble acompanha os aumentos reais de `Round::multiplier()`: 1× → 2×, 2× → 3× e 3× → 4×. A pontuação continua limitada a 4×, conforme as regras existentes. Quedas, sustains e acertos que mantêm o multiplicador não produzem novos pulsos. Recuperar a sequência volta a gerar feedback. Com teclado, o rumble também usa B; sem teclado, segue a porta do primeiro controle que comanda o jogo.
+
+O transporte usa um frame estático próprio, sem a espera bloqueante do helper de rumble do KOS 2.2.1. O hook Maple atende entradas, rumble e LCD nessa ordem. A parada tem prazo de 140 ms, atendido na próxima passagem do serviço Maple mesmo durante carregamentos. Os comandos finitos de frequência 7 e potências 5/6/7 correspondem a `0x01075010`, `0x01076010` e `0x01077010`; STOP é `0x00000010`. Os decodificadores reais dos pacotes RP G9A_RAMFIX1 e STOP_ZERO_SOURCE_FIX aceitaram as três condições com duração autônoma de 142 ms e aceitaram STOP com intensidade/duração zero. Pausa, reinício, saída da partida e troca de origem cancelam feedback pendente. Reconexão usa geração por dispositivo; retries e fila têm limites fixos.
+
+### Validação dirigida da própria CDI
+
+O Flycast oficial 2.7, sem alterações, executou dois ensaios. A prova de roteamento usou teclado em C, controles em A/B, VMUs A1/B1 e rumble A2/B2. O estado serializado independente dos periféricos confirmou A1 vazio e B1 animado. Remover B1 não causou envios a A1; recolocar B1 retomou a animação; remover o teclado restaurou a seleção A1.
+
+O ensaio de jogo usou eventos SDL de teclado recebidos pelo Maple e o Jurgen já existente para produzir acertos reais do chart. Os estados independentes do PuruPuru B2 confirmaram os três valores ON, STOP e a recuperação de 2×. Foram quatro inícios, quatro paradas e oito ACKs. Depois de chegar a 4×, mais 14 acertos não geraram outro pulso; 22 erros permaneceram silenciosos; recuperar 2× gerou o quarto pulso. A pausa encerrou o primeiro em 100 ms, e os STOP normais foram despachados em 150 ms na cadência Maple observada. O LCD continuou animado durante os pulsos, com 293 envios e 293 ACKs. Não houve erro Lua nem falha de asserção.
+
+Os testes de host em `tests/feedback/run.sh` exercitam o código real com barramento simulado: 11 cenários de rumble e uma sequência de transporte LCD, incluindo porta exclusiva, ambos os slots, falta de acessório, dispositivo ocupado, falha de fila, AGAIN, DMA em andamento, hotplug, cancelamento, pausa/reinício e descarte de imagens repetidas. Os 11 casos de rumble também passaram com ASan e UBSan. A sensação do motor e a execução desta revisão no Dreamcast físico ainda precisam de validação na bancada.
+
 ## Pista da VMU e crédito do port
 
 Código na branch `dreamcast-classic`, commit `852c5b9f24c7c16f34fcf5669c976e8320f2a248`, árvore `651809e4683dffd07da3a644c8feead9d25fb214`. A CDI foi compilada com KallistiOS 2.2.1, GCC SH-4 15.1.0, SH4ZAM, libvorbis, libogg, libkosfat e zlib. A compilação isolada usou `make -C dreamcast cdi CLASSIC_DATA=/caminho/para/data` com `CXXFLAGS="-std=c++17 -Wall -Wextra -Werror -MMD -MP -DFRETSONFIRE_INPUT_TRACE"`. Os 26 arquivos do repertório e os 21 efeitos Ogg passaram na prova da imagem e do ROM disk.
