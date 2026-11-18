@@ -1,5 +1,53 @@
 # Checkpoint do Frets on Fire clássico
 
+## Continuidade da auditoria documental · 18/11/2026
+
+**Estado:** auditoria documental; desenvolvimento não executado nesta auditoria; execução em outras sessões não verificada.
+
+Esta rodada registra um ponto de retomada por leitura do GitHub remoto. Não compilou, não gerou CDI, não executou o port, o Linux de referência, testes de host ou o Flycast e não acompanhou teste físico. Os resultados históricos abaixo permanecem atribuídos às respectivas revisões e ambientes.
+
+### Base remota confirmada
+
+| Ramo | HEAD observado em 18/11/2026 | Papel confirmado |
+| --- | --- | --- |
+| `dreamcast-classic` | `831a5e13e4ceb428f817b15ecac3d45650b2fb52` | Desenvolvimento atual do clássico; base desta alteração documental |
+| `dreamcast` | `fe782a43259abab95525742fc9513c03a100ae8e` | Etapa histórica FoFiX |
+| `master` | `fb10baaabb07ea898ea15c8ddcb04088a1384a3a` | Ramo padrão do fork; encaminha à documentação do clássico |
+
+A árvore da base é `9caa656fc24e96bf5b4ed33be4bc71fa8e522e97`. A consulta recursiva retornou 783 entradas, sem truncamento; não havia `AGENTS.md` nem documento de continuidade separado. A inspeção local desta auditoria não encontrou checkout acessível do projeto; alterações não publicadas em outros ambientes não foram verificadas.
+
+A referência continua sendo `FretsOnFire-1.3.110.tar.gz` para Linux, SHA-256 `c8cca75a897a8c4cadac06f92fd85b417ac41fc19fc719e89ddcd91a3c29f9da`, conforme o documento de referência. O Git legado relacionado é `fretsonfire/FretsOnFire@1017399a4b6fa659a90e2806e2d2f729e5cdc07d`. A etapa FoFiX não substitui essa referência atual.
+
+### Fontes lidas e limite da evidência
+
+Todos os arquivos abaixo foram lidos na revisão-base [`831a5e13e4ceb428f817b15ecac3d45650b2fb52`](https://github.com/olegne/fofixdreamcast/tree/831a5e13e4ceb428f817b15ecac3d45650b2fb52).
+
+| Arquivo | Blob na base | Uso nesta auditoria |
+| --- | --- | --- |
+| [`dreamcast/CHECKPOINT.md`](https://github.com/olegne/fofixdreamcast/blob/831a5e13e4ceb428f817b15ecac3d45650b2fb52/dreamcast/CHECKPOINT.md) | `63a583af60bf7e8ddf09f5d11c54495856520dbf` | Histórico de código, artefatos, ensaios e pendências |
+| [`dreamcast/README.md`](https://github.com/olegne/fofixdreamcast/blob/831a5e13e4ceb428f817b15ecac3d45650b2fb52/dreamcast/README.md) | `d6b9205d383b239acb8f048628efa1a6d5e12a82` | Ramo atual, controles e roteiro de bancada |
+| [`dreamcast/PARIDADE.md`](https://github.com/olegne/fofixdreamcast/blob/831a5e13e4ceb428f817b15ecac3d45650b2fb52/dreamcast/PARIDADE.md) | `026e0c2e508284f04b96ca7c460402c769986275` | Cobertura e limites de cada validação |
+| [`dreamcast/REFERENCIA_PC.md`](https://github.com/olegne/fofixdreamcast/blob/831a5e13e4ceb428f817b15ecac3d45650b2fb52/dreamcast/REFERENCIA_PC.md) | `35636e8502bb88ef4307cf82acaa74a043bd852a` | Identidade do pacote Linux e ambiente de referência |
+| [`dreamcast/ESCOPO_LINUX.md`](https://github.com/olegne/fofixdreamcast/blob/831a5e13e4ceb428f817b15ecac3d45650b2fb52/dreamcast/ESCOPO_LINUX.md) | `0ef9469131e623a85e8130c7f1ad0d0845efa609` | Inventário dos fluxos originais |
+
+A consulta do histórico remoto confirmou que `831a5e1` e seu pai `133aedc4b8eaa590d1a8253150dfe37eae50760a` documentam a etapa de código `55e50a24709878490ce407850abbf29c2e3302c4`. O checkpoint associa essa etapa à árvore `99f37d1c95d98f92a032ade3653e9d5876eba36b`, ao ELF SHA-256 `694c0d2421a37d01e7fc7c35101927b7e062b072475124822d0821f7d9c4834f` e à CDI SHA-256 `ba6a20f629d08b347bbb91635b559b8d5e785a4d15e3da1a18c78f332b22eb35`. São identidades e resultados históricos lidos, sem nova reprodução ou inspeção do binário nesta auditoria.
+
+### Alteração e verificação desta rodada
+
+Foram criadas as regras de retomada em [`AGENTS.md`](../AGENTS.md) e acrescentada somente esta seção ao checkpoint, preservando o restante. A verificação é documental: conferência dos ramos/HEADs, da árvore remota, da referência Linux e das fontes acima. O commit que contém esta seção identifica a alteração; seu pai é a base da tabela. A publicação deve usar árvore-base atual, pai atual e atualização da referência sem força com proteção contra avanço concorrente.
+
+O relato registrado em 18/11/2026 é de funcionamento no Dreamcast físico e de áudio ótimo no console, ruim no Flycast. A revisão/hash da CDI desse relato permanece sem associação. O relato não equivale a um novo ensaio físico acompanhado nesta rodada, e as capturas históricas aprovadas não encerram a diferença sonora percebida no Flycast.
+
+VMU na porta B com teclado e rumble nos aumentos de multiplicador já constam como implementados e ensaiados no emulador no checkpoint de 17/11/2026. Esta auditoria preserva esse estado e sua validação física pendente; não anuncia implementação nova desses recursos.
+
+### Pendências e próxima ação
+
+A tarefa documental encerra aqui. Nenhum processo de desenvolvimento foi iniciado ou observado; não há PID/job de execução a registrar nesta auditoria. A execução em outras sessões não foi verificada. Não houve bloqueio para a alteração documental. A ausência de nova execução é limite do escopo desta rodada, e a causa da qualidade sonora percebida no Flycast permanece em investigação, sem novo diagnóstico.
+
+Na retomada do desenvolvimento, primeiro releia o HEAD atual de `dreamcast-classic`, este checkpoint e o status/diff do checkout acessível. Preserve trabalho mais recente. Em seguida, associe o relato físico à revisão e ao SHA-256 da CDI efetivamente usada; se não for possível, mantenha essa identidade como desconhecida. Registre configuração e evidência antes de concluir qualquer validação.
+
+Continuam abertas a investigação do áudio no Flycast e as provas físicas detalhadas de sincronismo, mixagem, pausa/retomada, estéreo, cadência e mídia. O roteiro de bancada também inclui prioridade Maple, LCD/rumble na porta B, VMU, SD e vídeo; os ensaios históricos não dispensam a identificação do hardware e da CDI usada. Ranking histórico, adaptador físico e DVDs opcionais conservam os limites da matriz. Planeje a próxima verificação concreta a partir dessas evidências, sem regredir a commits antigos nem gerar outro artefato por suposição.
+
 ## Atualização de uso no Dreamcast e áudio · 18/11/2026
 
 Em 18/11/2026, Angelo128bits relatou que, por enquanto, o som está ruim no Flycast e ótimo no Dreamcast real. O funcionamento no console também foi relatado pelo autor. A revisão exata da CDI desse relato ainda precisa ser associada a um hash, e as medições de sincronismo, mixagem e desempenho no hardware continuam pendentes.
