@@ -1,5 +1,13 @@
 # Checkpoint do Frets on Fire clássico
 
+## Atualização de uso no Dreamcast e áudio · 18/11/2026
+
+Em 18/11/2026, Angelo128bits relatou que, por enquanto, o som está ruim no Flycast e ótimo no Dreamcast real. O funcionamento no console também foi relatado pelo autor. A revisão exata da CDI desse relato ainda precisa ser associada a um hash, e as medições de sincronismo, mixagem e desempenho no hardware continuam pendentes.
+
+O relato atualiza a avaliação de uso desta branch. Os ensaios históricos abaixo mantêm seus próprios commits, hashes de CDI e configurações. A revisão de código mais recente documentada antes desta nota é `55e50a24709878490ce407850abbf29c2e3302c4`, com CDI SHA-256 `ba6a20f629d08b347bbb91635b559b8d5e785a4d15e3da1a18c78f332b22eb35`, que acrescenta o LCD na porta B com teclado e o rumble dos multiplicadores.
+
+A situação do áudio no Flycast continua aberta, mesmo com capturas específicas aprovadas em continuidade e PCM. A fila de áudio, a carga do host e as configurações do emulador fazem parte das condições registradas dos ensaios. A experiência no Dreamcast físico informada pelo autor é de som ótimo por enquanto. As próximas medições no console devem associar a CDI utilizada ao seu hash e conferir sincronismo, mixagem, pausa, retomada e canais estéreo.
+
 ## VMU na porta 2 com teclado e rumble nos multiplicadores — 17/11/2026
 
 Continuação da CDI `FretsOnFire_13110_Dreamcast_VMU.cdi` de SHA-256 `21b854bfc01acb8b60a432502094637ea3598c74af96340a8e70af09182c1cee`. Código na branch `dreamcast-classic`, commit `55e50a24709878490ce407850abbf29c2e3302c4`, árvore `99f37d1c95d98f92a032ade3653e9d5876eba36b`. Compilação com KallistiOS 2.2.1 (tag oficial `b125c930da1a7969c5b9760da98254c666b3eeba`), GCC SH-4 15.1.0, libvorbis, libogg, SH4ZAM, zlib, libkosfat e mkdcdisc 0.0.4. Comando `make -C dreamcast cdi CLASSIC_DATA=/caminho/para/data`, com `CXXFLAGS="-std=c++17 -Wall -Wextra -Werror -MMD -MP -DFRETSONFIRE_INPUT_TRACE"`. O build terminou sem erros ou avisos.

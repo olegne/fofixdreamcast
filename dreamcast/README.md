@@ -2,6 +2,22 @@
 
 Port em desenvolvimento do Frets on Fire clássico da Unreal Voodoo. A referência é o pacote Linux original da versão 1.3.110. A branch `dreamcast-classic` parte do port nativo que implementou a entrada Maple e o streaming Vorbis pela AICA.
 
+## Estado atual do port · 18/11/2026
+
+O desenvolvimento atual está na branch `dreamcast-classic`, com referência no Frets on Fire clássico 1.3.110 para Linux. O port oferece guitarra com teclado Maple prioritário e controle como alternativa, as três músicas originais e o Tutorial, pausa, resultados, recordes e configuração na VMU, editor, biblioteca SD, animação no LCD e rumble nas mudanças do multiplicador. Com teclado ativo, conecte o controle com VMU e rumble na porta 2 (B).
+
+Em 18/11/2026, Angelo128bits relatou que, por enquanto, o som está ruim no Flycast e ótimo no Dreamcast real. O funcionamento no console também foi relatado pelo autor. A revisão exata da CDI desse relato ainda precisa ser associada a um hash, e as medições de sincronismo, mixagem e desempenho no hardware continuam pendentes.
+
+O [checkpoint](CHECKPOINT.md) identifica o código, o ELF e o SHA-256 da CDI testada e conserva o histórico das comparações. A [matriz de paridade](PARIDADE.md) registra a cobertura dos testes e as diferenças pendentes. A versão mais recente documentada acrescenta a seleção da VMU na porta B com teclado e a vibração nas mudanças 1× → 2× → 3× → 4×.
+
+## Áudio no Flycast e no Dreamcast
+
+Em 18/11/2026, Angelo128bits relatou que, por enquanto, o som está ruim no Flycast e ótimo no Dreamcast real. Esse é o estado de uso informado pelo autor nesta data.
+
+As capturas descritas no checkpoint registram os resultados de configurações específicas do Flycast. Algumas identificaram cortes e atrasos associados à fila de áudio do emulador e à carga do computador. Capturas que passaram pelos ensaios de PCM e continuidade comprovam aqueles trechos e perfis. O som ouvido pelo autor no Flycast segue ruim, e a causa dessa diferença de qualidade ainda está em investigação.
+
+No Dreamcast físico, a avaliação atual do autor é de som ótimo. A verificação detalhada no console inclui início e término, sincronismo com as notas, resposta aos erros e sustains, pausa, retomada e canais estéreo.
+
 ## Controles
 
 O teclado Maple assume o comando assim que é reconhecido em qualquer porta. O jogo ignora os botões do controle enquanto houver teclado. Ao remover o teclado, o primeiro controle conectado assume. Solte as teclas ou os botões do dispositivo que assumiu antes de voltar a tocar. Com teclado, conecte o controle com VMU e rumble na **porta 2 (B)** para receber a animação e a vibração. A VMU continua disponível para gravação.
