@@ -13,6 +13,14 @@ This is Frets on Fire X, a highly customizable rhythm game supporting many modes
 [![Latest packaged version(s)](https://repology.org/badge/latest-versions/fofix.svg)](https://repology.org/project/fofix/versions)
 
 
+## Dreamcast
+
+O port atual usa o Frets on Fire clássico 1.3.110 para Linux como referência e é desenvolvido na branch [`dreamcast-classic`](https://github.com/olegne/fofixdreamcast/tree/dreamcast-classic).
+
+Consulte as [instruções e o estado atual](https://github.com/olegne/fofixdreamcast/blob/dreamcast-classic/dreamcast/README.md), o [checkpoint com commits e hashes da CDI](https://github.com/olegne/fofixdreamcast/blob/dreamcast-classic/dreamcast/CHECKPOINT.md) e a [matriz de paridade](https://github.com/olegne/fofixdreamcast/blob/dreamcast-classic/dreamcast/PARIDADE.md).
+
+Em 18/11/2026, Angelo128bits relatou que, por enquanto, o som está ruim no Flycast e ótimo no Dreamcast real. O relato de uso e as pendências de validação física estão registrados na documentação do port.
+
 ## Install
 
 To install the game, you can read the [installation guide](https://fofix.readthedocs.io/en/latest/quickstart/installation.html).
